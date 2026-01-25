@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { 
+      width: 340px; 
+      padding: 15px; 
+      font-family: Arial, sans-serif;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    button { width: 100%; padding: 12px; margin: 5px 0; cursor: pointer; border-radius: 4px; font-size: 14px; }
+    #status { margin-top: 10px; font-size: 12px; color: #666; min-height: 20px; }
+    #startBtn { 
+      background: #2d7a2d; 
+      color: white; 
+      border: none;
+      font-weight: 500;
+    }
+    #startBtn:hover { background: #256325; }
+    #startBtn:disabled { background: #ccc; cursor: not-allowed; }
+    #stopBtn { background: #f44336; color: white; border: none; display: none; }
+    #stopBtn:hover { background: #d32f2f; }
+    input, select { padding: 5px; width: 100%; box-sizing: border-box; }
+    .progress { margin-top: 10px; background: #eee; border-radius: 4px; height: 20px; }
+    .progress-bar { background: #4CAF50; height: 100%; border-radius: 4px; transition: width 0.3s; }
+    .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+    .settings label { display: block; font-size: 12px; margin-bottom: 3px; }
+    h2 { margin-top: 0; margin-bottom: 5px; }
+    .hint { font-size: 12px; color: #888; margin-top: 0px; margin-bottom: 15px; }
+    .buttons { display: flex; gap: 10px; }
+    .buttons button { flex: 1; }
+    .accordion { 
+      background: #f1f1f1; 
+      cursor: pointer; 
+      padding: 10px; 
+      border: none; 
+      text-align: left; 
+      width: 100%; 
+      border-radius: 4px;
+      font-size: 13px;
+      margin-bottom: 5px;
+      margin-top: 15px;
+    }
+    .accordion:hover { background: #e1e1e1; }
+    .accordion.active { background: #ddd; }
+    .accordion:after {
+      content: '\25BC';
+      float: right;
+      font-size: 10px;
+    }
+    .accordion.active:after { content: '\25B2'; }
+    .panel {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.2s ease-out;
+      margin-bottom: 15px;
+    }
+    .panel.show { max-height: 300px; }
+  </style>
+  <script src="jspdf.umd.min.js"></script>
+</head>
+<body>
+  <h2>🚒 Canvas PDF Exporter</h2>
+  <div class="hint">Maakt automatisch een PDF van de cursusinhoud.</div>
+  
+  <div class="buttons">
+    <button id="startBtn">Download als PDF</button>
+    <button id="stopBtn">Stop</button>
+  </div>
+  <div class="progress" style="display:none;" id="progressContainer">
+    <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+  </div>
+  <div id="status"></div>
+  
+  <button class="accordion">Geavanceerde instellingen</button>
+  <div class="panel" id="advancedPanel">
+    <div class="settings" style="margin-top: 0px;">
+      <div>
+        <label>Totaal pagina's:</label>
+        <input type="number" id="totalPages" value="33" style="width: 55px;">
+      </div>
+      <div>
+        <label>Vertraging (ms):</label>
+        <input type="number" id="delay" value="200" style="width: 55px;">
+      </div>
+      <div style="grid-column: 1 / -1;">
+        <label>Kwaliteit:</label>
+        <select id="quality">
+          <option value="0.5">Laag</option>
+          <option value="0.65">Middel</option>
+          <option value="0.8">Goed</option>
+          <option value="0.92" selected>Hoog</option>
+          <option value="png">Maximum (PNG)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

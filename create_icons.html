@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<body>
+<canvas id="c16" width="16" height="16"></canvas>
+<canvas id="c48" width="48" height="48"></canvas>
+<canvas id="c128" width="128" height="128"></canvas>
+<script>
+// Create 16x16 icon
+const c16 = document.getElementById('c16').getContext('2d');
+c16.fillStyle = '#2d7a2d';
+c16.fillRect(0, 0, 16, 16);
+c16.font = '12px Arial';
+c16.textAlign = 'center';
+c16.textBaseline = 'middle';
+c16.fillText('🚒', 8, 8);
+
+// Create 48x48 icon
+const c48 = document.getElementById('c48').getContext('2d');
+c48.fillStyle = '#2d7a2d';
+c48.fillRect(0, 0, 48, 48);
+c48.font = '36px Arial';
+c48.textAlign = 'center';
+c48.textBaseline = 'middle';
+c48.fillText('🚒', 24, 24);
+
+// Create 128x128 icon
+const c128 = document.getElementById('c128').getContext('2d');
+c128.fillStyle = '#2d7a2d';
+c128.fillRect(0, 0, 128, 128);
+c128.font = '96px Arial';
+c128.textAlign = 'center';
+c128.textBaseline = 'middle';
+c128.fillText('🚒', 64, 64);
+</script>
+</body>
+</html>
