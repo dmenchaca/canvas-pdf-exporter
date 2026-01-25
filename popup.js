@@ -32,8 +32,8 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     await new Promise(r => setTimeout(r, 300)); // Wait for zoom to apply
   }
   
-  // Hide navbar by setting opacity to 0
-  await chrome.scripting.executeScript({
+  // Hide navbar by setting opacity to 0 and change mainCanvas background to white
+  const [originalBgResult] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: () => {
       const iframe = document.getElementById('ScormContent');
@@ -42,7 +42,16 @@ document.getElementById('startBtn').addEventListener('click', async () => {
         if (pagenav) {
           pagenav.style.opacity = '0';
         }
+        
+        // Change mainCanvas background to white and store original
+        const mainCanvas = iframe.contentDocument.getElementById('mainCanvas');
+        if (mainCanvas) {
+          const originalBg = mainCanvas.style.backgroundColor || '';
+          mainCanvas.style.backgroundColor = '#FFFFFF';
+          return originalBg;
+        }
       }
+      return null;
     }
   });
   
@@ -119,18 +128,25 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     }
   }
   
-  // Restore navbar opacity
+  // Restore navbar opacity and mainCanvas background
   await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: () => {
+    func: (originalBg) => {
       const iframe = document.getElementById('ScormContent');
       if (iframe && iframe.contentDocument) {
         const pagenav = iframe.contentDocument.querySelector('.pagenav');
         if (pagenav) {
           pagenav.style.opacity = '1';
         }
+        
+        // Restore mainCanvas original background
+        const mainCanvas = iframe.contentDocument.getElementById('mainCanvas');
+        if (mainCanvas) {
+          mainCanvas.style.backgroundColor = originalBg || '';
+        }
       }
-    }
+    },
+    args: [originalBgResult?.result || '']
   });
   
   // Restore original zoom level
