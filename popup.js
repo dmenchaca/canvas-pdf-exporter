@@ -4,6 +4,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   const totalPages = parseInt(document.getElementById('totalPages').value);
   const delay = parseInt(document.getElementById('delay').value);
   const qualityValue = document.getElementById('quality').value;
+  const resolution = parseFloat(document.getElementById('resolution').value);
   const cropToDiv = true; // Always crop to content div
   const status = document.getElementById('status');
   const startBtn = document.getElementById('startBtn');
@@ -21,6 +22,15 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   progressContainer.style.display = 'block';
   
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  
+  // Get original zoom level
+  const originalZoom = await chrome.tabs.getZoom(tab.id);
+  
+  // Set zoom level for higher resolution capture
+  if (resolution > 1) {
+    await chrome.tabs.setZoom(tab.id, originalZoom * resolution);
+    await new Promise(r => setTimeout(r, 300)); // Wait for zoom to apply
+  }
   
   // Hide navbar by setting opacity to 0
   await chrome.scripting.executeScript({
@@ -122,6 +132,11 @@ document.getElementById('startBtn').addEventListener('click', async () => {
       }
     }
   });
+  
+  // Restore original zoom level
+  if (resolution > 1) {
+    await chrome.tabs.setZoom(tab.id, originalZoom);
+  }
   
   status.textContent = 'PDF maken...';
   
