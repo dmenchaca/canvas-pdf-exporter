@@ -1,58 +1,43 @@
-# SCORM PDF Exporter v8
+# Canvas PDF Exporter
 
-## What's New in v8
+Een Chrome-extensie om Canvas-pagina's automatisch te exporteren naar PDF.
 
-This version crops screenshots to capture **only the `outerClipDiv` content** inside the SCORM iframe, removing all player UI elements including:
-- Top navigation bar
-- Player chrome
-- All UI elements outside the actual course content
+## Installatie-instructies
 
-The internal menus within the course (if any) will remain visible.
+### Stap 1: Download de code
 
-## Setup Instructions
+1. Ga naar https://github.com/dmenchaca/canvas-pdf-exporter
+2. Klik op de groene knop **"Code"**
+3. Selecteer **"Download ZIP"**
+4. Pak het ZIP-bestand uit op je computer
 
-### Step 1: Download jsPDF
+### Stap 2: Installeer de extensie in Chrome
 
-You need to add the jsPDF library to the extension folder:
+1. Open Chrome en ga naar `chrome://extensions/`
+2. Schakel **"Ontwikkelaarsmodus"** in (toggle rechtsboven)
+3. Klik op **"Uitgepakte extensie laden"**
+4. Selecteer de uitgepakte map `canvas-pdf-exporter`
+5. De extensie is nu geïnstalleerd en verschijnt in je werkbalk
 
-1. Download jsPDF from: https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
-2. Save it as `jspdf.umd.min.js` in this folder (scorm-exporter-v8)
+### Stap 3: Gebruik de extensie
 
-### Step 2: Install the Extension
+1. Navigeer naar je Canvas-cursus (pagina 1)
+2. Klik op het extensie-icoon in je werkbalk
+3. Configureer de instellingen:
+   - **Totaal aantal pagina's**: Aantal pagina's om vast te leggen
+   - **Vertraging**: Tijd tussen pagina-overgangen (1500ms aanbevolen)
+   - **Kwaliteit**: JPEG-kwaliteit of PNG voor verliesvrij
+   - **Resolutie**: Hoger = scherper maar grotere bestanden (2x aanbevolen)
+4. Klik op **"Start Capture"**
 
-1. Go to `chrome://extensions/`
-2. Enable "Developer mode" (toggle in top right)
-3. Click "Load unpacked"
-4. Select the `scorm-exporter-v8` folder
+## Functies
 
-### Step 3: Use the Extension
+- ✅ Stop-knop om opname halverwege te stoppen
+- ✅ Hoogwaardige opname (tot 3x zoom)
+- ✅ Kwaliteitsinstellingen van Laag tot Maximum (PNG)
+- ✅ Voortgangsbalk
+- ✅ Automatische PDF-generatie
 
-1. Navigate to your SCORM course (page 1)
-2. Click the extension icon in your toolbar
-3. Configure settings:
-   - **Total pages**: Number of pages to capture
-   - **Delay**: Time between page transitions (1500ms recommended)
-   - **Quality**: JPEG quality or PNG for lossless
-   - **Resolution**: Higher = sharper but larger files (2x recommended)
-   - **Crop to content div**: ✅ Check this to capture only outerClipDiv
-4. Click "Start Capture"
+## Ondersteuning
 
-## Features
-
-- ✅ Crops to `outerClipDiv` for clean content-only screenshots
-- ✅ Stop button to halt capture mid-process
-- ✅ High-resolution capture (up to 3x zoom)
-- ✅ Quality settings from Low to Maximum (PNG)
-- ✅ Progress bar
-- ✅ Automatic PDF generation
-
-## Folder Structure
-
-```
-scorm-exporter-v8/
-├── manifest.json
-├── popup.html
-├── popup.js
-├── jspdf.umd.min.js  ← YOU NEED TO ADD THIS FILE
-└── README.md
-```
+Voor vragen of problemen, maak een issue aan op GitHub: https://github.com/dmenchaca/canvas-pdf-exporter/issues
