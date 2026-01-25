@@ -23,12 +23,11 @@ Een Chrome-extensie om Canvas-pagina's automatisch te exporteren naar PDF.
 
 1. Navigeer naar je Canvas-cursus (pagina 1)
 2. Klik op het extensie-icoon in je werkbalk
-3. Configureer de instellingen:
+3. Configureer de instellingen (optioneel, klik op "Geavanceerde instellingen"):
    - **Totaal aantal pagina's**: Aantal pagina's om vast te leggen
-   - **Vertraging**: Tijd tussen pagina-overgangen (1500ms aanbevolen)
-   - **Kwaliteit**: JPEG-kwaliteit of PNG voor verliesvrij
-   - **Resolutie**: Hoger = scherper maar grotere bestanden (2x aanbevolen)
-4. Klik op **"Start Capture"**
+   - **Vertraging**: Tijd tussen pagina-overgangen (200ms standaard)
+   - **Kwaliteit**: JPEG-kwaliteit of PNG voor verliesvrij (Hoog standaard)
+4. Klik op **"Download als PDF"**
 
 ## Functies
 
