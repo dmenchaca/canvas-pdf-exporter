@@ -39,6 +39,13 @@ Een Chrome-extensie om Canvas-pagina's automatisch te exporteren naar PDF.
 - ✅ Automatische PDF-generatie
 - ✅ Automatische detectie van totaal aantal pagina's
 
+## Privacy
+
+Canvas PDF Exporter verzamelt geen gebruikersgegevens en werkt volledig lokaal op je apparaat.
+
+- 📄 [Privacybeleid (Nederlands)](PRIVACY_NL.md)
+- 📄 [Privacy Policy (English)](PRIVACY.md)
+
 ## Ondersteuning
 
 Voor vragen of problemen, maak een issue aan op GitHub: https://github.com/dmenchaca/canvas-pdf-exporter/issues
