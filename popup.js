@@ -5,6 +5,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   const delay = parseInt(document.getElementById('delay').value);
   const qualityValue = document.getElementById('quality').value;
   const resolution = parseFloat(document.getElementById('resolution').value);
+  const addPageNumbers = document.getElementById('pageNumbers').checked;
   const cropToDiv = true; // Always crop to content div
   const status = document.getElementById('status');
   const startBtn = document.getElementById('startBtn');
@@ -67,10 +68,58 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     
     await new Promise(r => setTimeout(r, 300));
     
+    // Inject page number into the page if enabled
+    if (addPageNumbers) {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (pageNum, total) => {
+          const iframe = document.getElementById('ScormContent');
+          if (iframe && iframe.contentDocument) {
+            const doc = iframe.contentDocument;
+            
+            // Create page number element
+            const pageNumberDiv = doc.createElement('div');
+            pageNumberDiv.id = 'injectedPageNumber';
+            pageNumberDiv.textContent = `${pageNum} van ${total}`;
+            pageNumberDiv.style.cssText = `
+              position: absolute;
+              bottom: 10px;
+              right: 10px;
+              font-family: Arial, sans-serif;
+              font-size: 14px;
+              color: rgba(60, 60, 60, 0.9);
+              padding: 4px 8px;
+              z-index: 9999;
+              pointer-events: none;
+            `;
+            
+            // Add to the main content area
+            const outerDiv = doc.getElementById('outerClipDiv');
+            if (outerDiv) {
+              // Store original position value
+              const originalPosition = outerDiv.style.position;
+              outerDiv.setAttribute('data-original-position', originalPosition);
+              
+              // Set position relative if not already positioned
+              const computedPosition = window.getComputedStyle(outerDiv).position;
+              if (computedPosition === 'static') {
+                outerDiv.style.position = 'relative';
+              }
+              
+              outerDiv.appendChild(pageNumberDiv);
+            }
+          }
+        },
+        args: [page, totalPages]
+      });
+      
+      await new Promise(r => setTimeout(r, 100)); // Wait for render
+    }
+    
     // Capture full viewport
     const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
     
-    // Get outerClipDiv position if cropping enabled
+    // Get outerClipDiv position if cropping enabled (do this BEFORE removing page number)
     let croppedDataUrl = dataUrl;
     if (cropToDiv) {
       const [cropInfo] = await chrome.scripting.executeScript({
@@ -102,6 +151,34 @@ document.getElementById('startBtn').addEventListener('click', async () => {
       }
     }
     
+    // Remove injected page number and restore original styles (do this AFTER cropping)
+    if (addPageNumbers) {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const iframe = document.getElementById('ScormContent');
+          if (iframe && iframe.contentDocument) {
+            const doc = iframe.contentDocument;
+            const outerDiv = doc.getElementById('outerClipDiv');
+            const pageNumberDiv = doc.getElementById('injectedPageNumber');
+            
+            if (pageNumberDiv) {
+              pageNumberDiv.remove();
+            }
+            
+            // Restore original position
+            if (outerDiv) {
+              const originalPosition = outerDiv.getAttribute('data-original-position');
+              if (originalPosition !== null) {
+                outerDiv.style.position = originalPosition;
+                outerDiv.removeAttribute('data-original-position');
+              }
+            }
+          }
+        }
+      });
+    }
+    
     captures.push(croppedDataUrl);
     
     if (page < totalPages) {
@@ -124,6 +201,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
         }
       });
       
+      // Use the configured delay to ensure page transition completes
       await new Promise(r => setTimeout(r, delay));
     }
   }
@@ -152,6 +230,13 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   // Restore original zoom level
   if (resolution > 1) {
     await chrome.tabs.setZoom(tab.id, originalZoom);
+  }
+  
+  // Check if we have any captures to export
+  if (captures.length === 0) {
+    status.textContent = 'Geen pagina\'s vastgelegd.';
+    resetButtons();
+    return;
   }
   
   status.textContent = 'PDF maken...';
@@ -211,7 +296,11 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   
   pdf.save(pdfFilename);
   
-  status.textContent = `Klaar! PDF met ${captures.length} pagina's gedownload.`;
+  if (stopRequested) {
+    status.textContent = `Gestopt! PDF met ${captures.length} pagina's gedownload.`;
+  } else {
+    status.textContent = `Klaar! PDF met ${captures.length} pagina's gedownload.`;
+  }
   resetButtons();
   
   function resetButtons() {
