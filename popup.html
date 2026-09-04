@@ -60,10 +60,20 @@
     .panel.show { max-height: 300px; }
   </style>
   <script src="jspdf.umd.min.js"></script>
+  <script src="pdf-lib.min.js"></script>
 </head>
 <body>
   <h2>🚒 Canvas PDF Exporter</h2>
-  <div class="hint">Maakt automatisch een PDF van de cursusinhoud.</div>
+  <div class="hint" id="hint">Maakt automatisch een PDF van de cursusinhoud.</div>
+
+  <div style="margin-bottom: 12px;">
+    <label style="display:block; font-size:12px; margin-bottom:3px;">Type cursus:</label>
+    <select id="mode">
+      <option value="classic">Klassiek (dia's als afbeeldingen)</option>
+      <option value="rise">Rise (echte tekst, alle hoofdstukken)</option>
+    </select>
+    <div class="rise-only" id="riseInfo" style="font-size:12px; color:#888; margin-top:4px;"></div>
+  </div>
   
   <div class="buttons">
     <button id="startBtn">Download als PDF</button>
@@ -77,7 +87,7 @@
   <button class="accordion">Geavanceerde instellingen</button>
   <div class="panel" id="advancedPanel">
     <div class="settings" style="margin-top: 0px;">
-      <div>
+      <div class="classic-only">
         <label>Totaal pagina's:</label>
         <input type="number" id="totalPages" value="33" style="width: 55px;">
       </div>
@@ -85,7 +95,16 @@
         <label>Vertraging (ms):</label>
         <input type="number" id="delay" value="600" style="width: 55px;">
       </div>
-      <div style="grid-column: 1 / -1;">
+      <div class="rise-only" style="grid-column: 1 / -1;">
+        <label>Schaal (kleiner = meer per pagina):</label>
+        <select id="riseScale">
+          <option value="1">100%</option>
+          <option value="0.85" selected>85%</option>
+          <option value="0.75">75%</option>
+          <option value="0.65">65%</option>
+        </select>
+      </div>
+      <div class="classic-only" style="grid-column: 1 / -1;">
         <label>Kwaliteit:</label>
         <select id="quality">
           <option value="0.5">Laag</option>
@@ -95,7 +114,7 @@
           <option value="png">Maximum (PNG)</option>
         </select>
       </div>
-      <div style="grid-column: 1 / -1;">
+      <div class="classic-only" style="grid-column: 1 / -1;">
         <label>Resolutie:</label>
         <select id="resolution">
           <option value="1" selected>Normaal (1x)</option>
@@ -111,6 +130,8 @@
     </div>
   </div>
   
+  <script src="classic.js"></script>
+  <script src="rise.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
