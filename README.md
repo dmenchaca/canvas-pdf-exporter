@@ -30,6 +30,18 @@ Een Chrome-extensie om Canvas-pagina's automatisch te exporteren naar PDF.
    - **Resolutie**: Normaal (1x) of Hoog (2x) voor scherpere afbeeldingen
 4. Klik op **"Download als PDF"**
 
+## Twee soorten cursussen
+
+De extensie herkent automatisch welk type cursus open staat:
+
+- **Klassiek** (mode A): de oude SCORM-speler met losse dia's. Elke dia wordt als afbeelding vastgelegd en samengevoegd tot een PDF. Dit werkt precies zoals in versie 1.9.
+- **Rise** (mode B): de nieuwe Canvas-speler met een rood hoofdstukkenmenu (Articulate Rise). Alle hoofdstukken worden na elkaar geopend en met de printfunctie van Chrome omgezet naar een PDF met **echte, selecteerbare tekst**. Tijdens het exporteren toont Chrome een gele balk "Canvas PDF Exporter is begonnen met foutopsporing"; dat is normaal en verdwijnt na afloop.
+
+Tips voor Rise-cursussen:
+- Sluit DevTools (F12) voordat je exporteert, anders kan de extensie niet aan het tabblad koppelen.
+- Interactieve blokken (flashcards, sorteeroefeningen, scenario's) worden afgedrukt zoals ze op dat moment zichtbaar zijn; video's als stilstaand beeld.
+- Met **Schaal** in de geavanceerde instellingen past meer inhoud op een pagina.
+
 ## Functies
 
 - ✅ Stop-knop om opname halverwege te stoppen
@@ -38,6 +50,7 @@ Een Chrome-extensie om Canvas-pagina's automatisch te exporteren naar PDF.
 - ✅ Voortgangsbalk
 - ✅ Automatische PDF-generatie
 - ✅ Automatische detectie van totaal aantal pagina's
+- ✅ Rise-cursussen: PDF met echte tekst van alle hoofdstukken
 
 ## Privacy
 
