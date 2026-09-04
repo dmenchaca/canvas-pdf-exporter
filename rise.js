@@ -46,8 +46,7 @@ function riseInstallHelpers() {
   H.walk = function () {
     const isRise = (doc) =>
       doc.getElementById('nav-sidebar-outline-list') ||
-      doc.querySelector('.blocks-lesson') ||
-      doc.querySelector('.page-wrap');
+      doc.querySelector('.blocks-lesson');
     const visit = (doc, path) => {
       if (isRise(doc)) return { riseDoc: doc, chain: path };
       for (const f of doc.querySelectorAll('iframe')) {
@@ -77,6 +76,41 @@ function riseInstallHelpers() {
     el.removeAttribute('data-cpe-style');
   };
 
+  // Overzicht van alle (geneste) frames en wat erin gevonden wordt, voor het logboek.
+  H.diagnose = function () {
+    const count = (doc, sel) => { try { return doc.querySelectorAll(sel).length; } catch (e) { return -1; } };
+    const describe = (doc, depth, out) => {
+      const entry = {
+        depth,
+        url: (doc.location && doc.location.href || '').substring(0, 160),
+        title: (doc.title || '').substring(0, 80),
+        readyState: doc.readyState,
+        iframes: count(doc, 'iframe'),
+        navOutlineList: count(doc, '#nav-sidebar-outline-list'),
+        outlineLinks: count(doc, '#nav-sidebar-outline-list a.nav-sidebar__outline-item__link'),
+        anyOutlineLinks: count(doc, 'a.nav-sidebar__outline-item__link'),
+        blocksLesson: count(doc, '.blocks-lesson'),
+        pageWrap: count(doc, '.page-wrap'),
+        navSidebar: count(doc, '#nav-sidebar'),
+        scormContent: count(doc, '#ScormContent'),
+        outerClipDiv: count(doc, '#outerClipDiv')
+      };
+      out.push(entry);
+      doc.querySelectorAll('iframe').forEach((f, i) => {
+        let cd = null, err = null;
+        try { cd = f.contentDocument; } catch (e) { err = e.message; }
+        if (cd && cd.documentElement) {
+          describe(cd, depth + 1, out);
+        } else {
+          out.push({ depth: depth + 1, iframe: i, id: f.id, name: f.name, src: (f.src || '').substring(0, 160), inaccessible: true, error: err });
+        }
+      });
+    };
+    const out = [];
+    describe(document, 0, out);
+    return out;
+  };
+
   H.info = function () {
     const w = H.walk();
     if (!w) return null;
@@ -96,7 +130,11 @@ function riseInstallHelpers() {
       lessons,
       courseTitle,
       currentHref: rd.defaultView.location.href,
-      depth: w.chain.length
+      depth: w.chain.length,
+      riseDocUrl: (rd.location.href || '').substring(0, 160),
+      outlineListFound: !!rd.getElementById('nav-sidebar-outline-list'),
+      anyOutlineLinks: rd.querySelectorAll('a.nav-sidebar__outline-item__link').length,
+      blocksLesson: rd.querySelectorAll('.blocks-lesson').length
     };
   };
 
@@ -220,13 +258,48 @@ function riseInstallHelpers() {
 }
 
 async function riseExec(tabId, func, args = []) {
-  const [r] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
-  return r ? r.result : undefined;
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
+    return r ? r.result : undefined;
+  } catch (e) {
+    Log.error(`executeScript mislukt (${func.name || 'anoniem'})`, e);
+    throw e;
+  }
 }
 
 async function riseEnsureHelpers(tabId) {
   const has = await riseExec(tabId, () => !!window.__cpeRise);
-  if (!has) await riseExec(tabId, riseInstallHelpers);
+  if (!has) {
+    await riseExec(tabId, riseInstallHelpers);
+    Log.debug('Rise-helpers geïnstalleerd in pagina');
+  }
+}
+
+// Logt de frame-structuur: eerst via de top-frame (door same-origin iframes heen),
+// daarna per frame via allFrames zodat ook cross-origin frames zichtbaar worden.
+async function logFrameDiagnostics(tabId) {
+  try {
+    await riseEnsureHelpers(tabId);
+    const tree = await riseExec(tabId, () => window.__cpeRise.diagnose());
+    Log.info('Frame-structuur vanuit top-frame', tree);
+  } catch (e) {
+    Log.error('Frame-diagnose vanuit top-frame mislukt', e);
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => ({
+        url: location.href.substring(0, 160),
+        top: window === window.top,
+        outlineLinks: document.querySelectorAll('a.nav-sidebar__outline-item__link').length,
+        blocksLesson: document.querySelectorAll('.blocks-lesson').length,
+        outerClipDiv: !!document.getElementById('outerClipDiv')
+      })
+    });
+    Log.info('Alle frames (allFrames)', results.map((r) => Object.assign({ frameId: r.frameId }, r.result)));
+  } catch (e) {
+    Log.error('allFrames-diagnose mislukt', e);
+  }
 }
 
 async function detectRiseCourse(tabId) {
@@ -234,7 +307,7 @@ async function detectRiseCourse(tabId) {
     await riseEnsureHelpers(tabId);
     return await riseExec(tabId, () => window.__cpeRise.info());
   } catch (e) {
-    console.log('Rise detection failed:', e);
+    Log.error('Rise-detectie mislukt', e);
     return null;
   }
 }
@@ -284,11 +357,16 @@ async function runRiseMode() {
   let info = null;
   const parts = [];
 
+  Log.info('Rise-export gestart', { tabId, url: tab.url, settle, scale, addPageNumbers });
+
   try {
     status.textContent = 'Cursus analyseren...';
     await riseEnsureHelpers(tabId);
+    await logFrameDiagnostics(tabId);
     info = await riseExec(tabId, () => window.__cpeRise.info());
+    Log.info('Cursusinfo', info);
     if (!info || !info.lessons.length) {
+      Log.warn('Geen hoofdstukkenlijst gevonden; export afgebroken');
       status.textContent = 'Geen Rise-hoofdstukkenlijst gevonden. Open het menu (☰) en probeer opnieuw.';
       resetButtons();
       return;
@@ -297,19 +375,23 @@ async function runRiseMode() {
     try {
       await chrome.debugger.attach(debuggee, '1.3');
       attached = true;
+      Log.info('Debugger gekoppeld');
     } catch (e) {
+      Log.error('Debugger koppelen mislukt', e);
       status.textContent = 'Kan niet aan het tabblad koppelen (sluit DevTools en probeer opnieuw). ' + (e.message || '');
       resetButtons();
       return;
     }
 
-    await riseExec(tabId, (css) => window.__cpeRise.applyLayout(css), [RISE_PRINT_CSS]);
+    const applied = await riseExec(tabId, (css) => window.__cpeRise.applyLayout(css), [RISE_PRINT_CSS]);
     layoutApplied = true;
+    Log.info('Printopmaak toegepast', applied);
 
     const total = info.lessons.length;
     for (let i = 0; i < total; i++) {
       if (riseStopRequested) break;
       const lesson = info.lessons[i];
+      Log.info(`Hoofdstuk ${i + 1}/${total}`, lesson);
       status.textContent = `Hoofdstuk ${i + 1} van ${total}: ${lesson.title}...`;
       progressBar.style.width = `${((i + 0.5) / total) * 100}%`;
 
@@ -321,11 +403,14 @@ async function runRiseMode() {
         if (ready) break;
         await new Promise((r) => setTimeout(r, 250));
       }
-      if (!ready) console.log('Lesson did not report ready, printing anyway:', lesson.title);
+      if (!ready) Log.warn('Hoofdstuk meldde zich niet klaar binnen 15 s; toch printen', lesson.id);
+      else Log.debug('Hoofdstuk geladen', lesson.id);
       await new Promise((r) => setTimeout(r, settle));
 
-      await riseExec(tabId, (ms) => window.__cpeRise.prepare(ms), [Math.min(settle, 1500)]);
+      const prep = await riseExec(tabId, (ms) => window.__cpeRise.prepare(ms), [Math.min(settle, 1500)]);
+      Log.info('Voorbereid', prep);
 
+      const t0 = Date.now();
       const { data } = await chrome.debugger.sendCommand(debuggee, 'Page.printToPDF', {
         printBackground: true,
         preferCSSPageSize: false,
@@ -339,19 +424,21 @@ async function runRiseMode() {
         displayHeaderFooter: false
       });
       parts.push(base64ToBytes(data));
+      Log.info('PDF gerenderd', { bytes: parts[parts.length - 1].length, ms: Date.now() - t0 });
       progressBar.style.width = `${((i + 1) / total) * 100}%`;
     }
   } catch (e) {
-    console.error(e);
+    Log.error('Export mislukt', e);
     status.textContent = 'Fout: ' + (e.message || e);
   } finally {
     if (attached) {
-      try { await chrome.debugger.detach(debuggee); } catch (e) { /* al losgekoppeld */ }
+      try { await chrome.debugger.detach(debuggee); Log.debug('Debugger losgekoppeld'); } catch (e) { Log.warn('Debugger loskoppelen', e); }
     }
     if (layoutApplied) {
       try {
         await riseExec(tabId, (href) => window.__cpeRise.restore(href), [info ? info.currentHref : null]);
-      } catch (e) { console.log('Restore failed:', e); }
+        Log.debug('Oorspronkelijke opmaak hersteld');
+      } catch (e) { Log.error('Herstellen van opmaak mislukt', e); }
     }
   }
 
@@ -393,10 +480,11 @@ async function runRiseMode() {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 
     const n = out.getPageCount();
+    Log.info('PDF gedownload', { filename: a.download, lessons: parts.length, pages: n, bytes: bytes.length });
     status.textContent = (riseStopRequested ? 'Gestopt! ' : 'Klaar! ') +
       `PDF met ${parts.length} hoofdstuk${parts.length === 1 ? '' : 'ken'} (${n} pagina's) gedownload.`;
   } catch (e) {
-    console.error(e);
+    Log.error('Samenvoegen mislukt', e);
     status.textContent = 'Fout bij samenvoegen: ' + (e.message || e);
   }
   resetButtons();

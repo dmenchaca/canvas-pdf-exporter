@@ -26,6 +26,7 @@ async function runClassicMode() {
   progressContainer.style.display = 'block';
   
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  Log.info('Klassieke export gestart', { tabId: tab.id, url: tab.url, totalPages, delay, quality: qualityValue, resolution, addPageNumbers });
   
   // Get original zoom level
   const originalZoom = await chrome.tabs.getZoom(tab.id);
@@ -151,6 +152,8 @@ async function runClassicMode() {
       
       if (cropInfo.result) {
         croppedDataUrl = await cropImage(dataUrl, cropInfo.result, usePng, quality);
+      } else {
+        Log.warn(`Pagina ${page}: outerClipDiv niet gevonden, hele schermafbeelding gebruikt`);
       }
     }
     
@@ -298,6 +301,7 @@ async function runClassicMode() {
   }
   
   pdf.save(pdfFilename);
+  Log.info('PDF opgeslagen', { filename: pdfFilename, pages: captures.length, stopped: stopRequested });
   
   if (stopRequested) {
     status.textContent = `Gestopt! PDF met ${captures.length} pagina's gedownload.`;
@@ -380,7 +384,7 @@ async function detectClassicTotalPages(tabId) {
       return result[0].result;
     }
   } catch (error) {
-    console.log('Could not auto-detect total pages:', error);
+    Log.warn('Automatische paginadetectie (klassiek) mislukt', error);
   }
   return null;
 }

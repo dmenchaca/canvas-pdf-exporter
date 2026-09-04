@@ -42,6 +42,10 @@ Tips voor Rise-cursussen:
 - Interactieve blokken (flashcards, sorteeroefeningen, scenario's) worden afgedrukt zoals ze op dat moment zichtbaar zijn; video's als stilstaand beeld.
 - Met **Schaal** in de geavanceerde instellingen past meer inhoud op een pagina.
 
+## Logboek delen bij problemen
+
+Werkt iets niet? Open in de popup het paneel **Logboek**, klik op **Kopieer logboek** en plak de tekst in je bericht (of gebruik **Download** voor een .txt-bestand). Het logboek bevat per stap wat de extensie deed en welke frames en elementen ze op de pagina vond, en blijft bewaard nadat de popup gesloten is.
+
 ## Functies
 
 - ✅ Stop-knop om opname halverwege te stoppen
@@ -51,6 +55,7 @@ Tips voor Rise-cursussen:
 - ✅ Automatische PDF-generatie
 - ✅ Automatische detectie van totaal aantal pagina's
 - ✅ Rise-cursussen: PDF met echte tekst van alle hoofdstukken
+- ✅ Logboek dat je eenvoudig kunt kopiëren en delen
 
 ## Privacy
 

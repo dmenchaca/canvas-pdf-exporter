@@ -57,8 +57,9 @@
       transition: max-height 0.2s ease-out;
       margin-bottom: 15px;
     }
-    .panel.show { max-height: 300px; }
+    .panel.show { max-height: 400px; }
   </style>
+  <script src="logger.js"></script>
   <script src="jspdf.umd.min.js"></script>
   <script src="pdf-lib.min.js"></script>
 </head>
@@ -130,6 +131,17 @@
     </div>
   </div>
   
+  <button class="accordion" id="logAccordion">Logboek</button>
+  <div class="panel" id="logPanel">
+    <textarea id="logBox" readonly style="width:100%; height:140px; font-family: monospace; font-size:10px; box-sizing:border-box; resize:vertical;"></textarea>
+    <div class="buttons" style="margin-top:6px;">
+      <button id="logCopy" style="background:#1976d2; color:white; border:none;">Kopieer logboek</button>
+      <button id="logDownload" style="background:#555; color:white; border:none;">Download</button>
+      <button id="logClear" style="background:#eee; border:1px solid #ccc;">Wis</button>
+    </div>
+    <div class="hint" style="margin-top:6px;">Deel dit logboek bij problemen.</div>
+  </div>
+
   <script src="classic.js"></script>
   <script src="rise.js"></script>
   <script src="popup.js"></script>
