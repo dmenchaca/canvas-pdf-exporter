@@ -37,6 +37,14 @@ De extensie herkent automatisch welk type cursus open staat:
 - **Klassiek** (mode A): de oude SCORM-speler met losse dia's. Elke dia wordt als afbeelding vastgelegd en samengevoegd tot een PDF. Dit werkt precies zoals in versie 1.9.
 - **Rise** (mode B): de nieuwe Canvas-speler met een rood hoofdstukkenmenu (Articulate Rise). Alle hoofdstukken worden na elkaar geopend en met de printfunctie van Chrome omgezet naar een PDF met **echte, selecteerbare tekst**. Tijdens het exporteren toont Chrome een gele balk "Canvas PDF Exporter is begonnen met foutopsporing"; dat is normaal en verdwijnt na afloop.
 
+- **Storyline** (mode C): e-modules gemaakt met Articulate Storyline (losse dia's, vaak met een keuzemenu). De extensie leest de cursusdata (alle dia's, vragen met juiste antwoorden, afbeeldingen) en downloadt die als `<cursus>.sl.json`. De PDF maak je daarna lokaal:
+
+  ```bash
+  python3 storyline-pdf.py "<cursus>.sl.json"
+  ```
+
+  Dit levert dezelfde stijl als mode B (echte tekst, hoofdstukken met inhoudsopgave, vraagkaders met het juiste antwoord aangevinkt en een toelichting, echte PDF-vinkvakjes). Vereist Python 3 met `reportlab` en `Pillow` (`pip3 install reportlab pillow`). Zonder extensie: plak `console-storyline.js` in de console van het spelertabblad.
+
 Tips voor Rise-cursussen:
 - Sluit DevTools (F12) voordat je exporteert, anders kan de extensie niet aan het tabblad koppelen.
 - Interactieve blokken (flashcards, sorteeroefeningen, scenario's) worden afgedrukt zoals ze op dat moment zichtbaar zijn; video's als stilstaand beeld.
@@ -51,6 +59,9 @@ Tips voor Rise-cursussen:
 - ✅ Automatische PDF-generatie
 - ✅ Automatische detectie van totaal aantal pagina's
 - ✅ Rise-cursussen: PDF met echte tekst van alle hoofdstukken
+- ✅ Paginanummers aan: ook de naam van de e-module links in de voettekst
+- ✅ Rise: canvasblokken en sorteeroefeningen (met de juiste indeling) worden meegenomen
+- ✅ Storyline-cursussen: PDF met echte tekst, afbeeldingen en beantwoorde vragen
 
 ## Privacy
 

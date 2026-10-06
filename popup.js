@@ -8,10 +8,12 @@ function currentMode() {
 function applyModeUI() {
   const mode = currentMode();
   document.querySelectorAll('.classic-only').forEach((el) => { el.style.display = mode === 'classic' ? '' : 'none'; });
-  document.querySelectorAll('.rise-only').forEach((el) => { el.style.display = mode === 'rise' ? '' : 'none'; });
+  document.querySelectorAll('.rise-only').forEach((el) => { el.style.display = (mode === 'rise' || mode === 'storyline') ? '' : 'none'; });
   document.getElementById('hint').textContent = mode === 'rise'
-    ? 'Maakt een PDF met echte tekst van alle hoofdstukken (Rise-cursus).'
-    : 'Maakt automatisch een PDF van de cursusinhoud.';
+    ? 'Maakt een nette PDF (echte tekst, eigen opmaak, antwoorden aangevinkt) van alle hoofdstukken.'
+    : mode === 'storyline'
+      ? 'Leest alle dia\'s van de Storyline-cursus en downloadt de cursusdata (.sl.json). Maak daarna de PDF met: python3 storyline-pdf.py <bestand>.sl.json'
+      : 'Maakt automatisch een PDF van de cursusinhoud.';
 }
 
 document.getElementById('mode').addEventListener('change', applyModeUI);
@@ -19,6 +21,8 @@ document.getElementById('mode').addEventListener('change', applyModeUI);
 document.getElementById('startBtn').addEventListener('click', () => {
   if (currentMode() === 'rise') {
     runRiseMode();
+  } else if (currentMode() === 'storyline') {
+    runStorylineMode();
   } else {
     runClassicMode();
   }
@@ -27,6 +31,8 @@ document.getElementById('startBtn').addEventListener('click', () => {
 document.getElementById('stopBtn').addEventListener('click', () => {
   if (currentMode() === 'rise') {
     stopRiseMode();
+  } else if (currentMode() === 'storyline') {
+    /* niet te onderbreken: leest alleen bestanden */
   } else {
     stopClassicMode();
   }
@@ -55,6 +61,14 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('mode').value = 'rise';
       document.getElementById('riseInfo').textContent =
         `${rise.courseTitle} · ${rise.lessons.length} hoofdstuk${rise.lessons.length === 1 ? '' : 'ken'} gevonden`;
+      applyModeUI();
+      return;
+    }
+
+    const story = await detectStorylineCourse(tabId);
+    if (story) {
+      document.getElementById('mode').value = 'storyline';
+      document.getElementById('riseInfo').textContent = story.title + ' · Storyline-cursus gevonden';
       applyModeUI();
       return;
     }

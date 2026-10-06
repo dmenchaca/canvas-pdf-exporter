@@ -1,121 +1,11 @@
-// Mode B: Articulate Rise-cursus in de nieuwe Canvas/Rustici "modern" speler.
-//
-// Werkwijze: de tekst van elke les staat als gewone HTML in een (geneste) iframe.
-// We lopen alle hoofdstukken langs, kopiëren de lesinhoud naar één "boek" in het
-// bovenste document (buiten de iframes), zetten de stylesheets van Rise daarbij en
-// laten Chrome dat als één document afdrukken (Page.printToPDF via chrome.debugger,
-// of Cmd+P vanuit de console-variant). Resultaat: één PDF met echte tekst.
-//
-// De helpers hieronder (riseInstallHelpers) zijn ook los bruikbaar in de console:
-// zie console-export.js (gegenereerd door build-console.js).
-
-let riseStopRequested = false;
-
-// Opmaak voor het boek in het bovenste document.
-// Opmaak van het uiteindelijke, schone document (zelfde CSS als book-to-print.py).
-const RISE_PRINT_CSS = `
-@page { size: A4; margin: 20mm 26mm 22mm; }
-@page { @bottom-left { content: "__CPE_TITLE__"; font: 9pt Helvetica, Arial, sans-serif; color: #777; } @bottom-right { content: counter(page) " / " counter(pages); font: 9pt Helvetica, Arial, sans-serif; color: #777; } }
-* { box-sizing: border-box; }
-html { font-size: 11pt; }
-body { margin: 0; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #1a1a1a; line-height: 1.5; text-rendering: optimizeLegibility; }
-p { margin: 0 0 .85em; orphans: 3; widows: 3; }
-p:last-child { margin-bottom: 0; }
-a { color: inherit; text-decoration: underline; }
-img { max-width: 100%; height: auto; display: block; }
-table { border-collapse: collapse; width: 100%; margin: .8em 0 1.4em; font-size: .95em; break-inside: avoid; font-variant-numeric: tabular-nums; }
-th, td { border: 1px solid #cfcfcf; padding: .35em .6em; text-align: left; vertical-align: top; }
-th { background: #eef2f5; }
-
-.cover { break-after: page; display: flex; flex-direction: column; justify-content: center; min-height: 240mm; }
-.cover .cover-kicker { font-size: 11pt; color: #bc1413; margin-bottom: .8em; }
-.cover h1 { font-size: 28pt; line-height: 1.15; margin: 0 0 .6em; letter-spacing: -.01em; text-wrap: balance; }
-.cover .toc { margin-top: 3em; }
-.cover .toc h2 { font-size: 10pt; text-transform: uppercase; letter-spacing: .08em; color: #555; margin: 0 0 .6em; }
-.cover .toc ol { margin: 0; padding-left: 1.4em; font-size: 12pt; line-height: 1.7; }
-
-.chapter { break-before: page; }
-.chapter-header { border-bottom: 1px solid #bc1413; padding-bottom: .6em; margin: 0 0 1.6em; break-inside: avoid; break-after: avoid; }
-.chapter-header .kicker { font-size: 11pt; color: #bc1413; margin: 0 0 .35em; }
-.chapter-header h1 { font-size: 20pt; line-height: 1.2; margin: 0; letter-spacing: -.01em; text-wrap: balance; }
-
-h2.section { font-size: 14pt; color: #1a1a1a; margin: 2em 0 .6em; break-after: avoid; line-height: 1.25; text-wrap: balance; }
-h2.band { font-size: 17pt; color: #1a1a1a; line-height: 1.25; padding: 0 0 .35em; border-bottom: 1px solid #c9c9c9; margin: 2.8em 0 1.1em; break-after: avoid; text-wrap: balance; }
-h3 { font-size: 13pt; line-height: 1.3; margin: 1.5em 0 .5em; break-after: avoid; }
-.block { margin: 0 0 1.5em; }
-.block.keep { break-inside: avoid; }
-
-ul.list, ol.list, .block ul, .block ol, .card ul, .card ol, .quiz .question ul, .quiz .question ol, dd ul, dd ol, .labels ul, .labels ol, .answer ul, .answer ol { margin: .5em 0 1.5em; padding-left: 1.5em; }
-ul.list li, ol.list li, .block li, .card li, dd li, .labels ol li li, .answer li { margin: 0 0 .45em; }
-.block li p, .card li p { margin: 0; }
-ol.numbered { list-style: none; padding-left: 0; counter-reset: n; }
-ol.numbered li { counter-increment: n; position: relative; padding-left: 2.3em; margin: 0 0 .7em; }
-ol.numbered li::before { content: counter(n); position: absolute; left: 0; top: .05em; width: 1.6em; height: 1.6em; border-radius: 50%; background: #bc1413; color: #fff; font-weight: 700; font-size: .85em; text-align: center; line-height: 1.6; }
-
-figure { margin: 1.2em 0 1.8em; break-inside: avoid; }
-figure img { margin: 0 auto; max-height: 90mm; width: auto; }
-/* Brede schema's niet minuscuul laten: hele kolombreedte. */
-figure.wide img { width: 100%; max-height: 90mm; object-fit: contain; }
-/* Hotspot- en meterafbeeldingen: hooguit een halve pagina hoog. */
-figure.graphic img { max-height: 80mm; width: auto; }
-/* Storyline: veel fotodia's; iets lager zodat twee figuren op een pagina passen. */
-.sl figure img { max-height: 72mm; }
-figcaption { font-size: 9.5pt; line-height: 1.4; color: #666; margin-top: .6em; text-align: center; }
-.image-aside { display: flex; gap: 1.4em; align-items: flex-start; break-inside: avoid; margin: 0 0 1.6em; }
-.image-aside .text { flex: 1 1 55%; }
-.image-aside figure { flex: 0 0 42%; margin: 0; }
-.image-aside figure img { width: 100%; max-height: 70mm; object-fit: contain; }
-
-.card { border: 1px solid #d9d9d9; border-radius: 6px; padding: 1em 1.3em 1.1em; margin: 0 0 1.3em; break-inside: avoid; background: #fff; }
-.card .card-number { font-size: 9pt; line-height: 1.4; text-transform: uppercase; letter-spacing: .08em; color: #666; font-weight: 700; margin-bottom: .2em; }
-.card h3 { margin: 0 0 .7em; font-size: 13pt; }
-.card figure { margin: .6em 0 1em; }
-.card figure img { max-height: 62mm; }
-.process-intro { background: #f4f6f8; border: none; }
-
-.quiz { break-inside: avoid; border: 1px solid #b9cdd8; border-radius: 6px; padding: 1.1em 1.3em 1.2em; margin: 2em 0 1.8em; background: #f7fafc; }
-.quiz .quiz-label { font-size: 9pt; line-height: 1.4; text-transform: uppercase; letter-spacing: .1em; color: #2f6f8f; font-weight: 700; margin-bottom: .5em; }
-.quiz .question { font-weight: 700; margin-bottom: .7em; }
-.quiz .hint { font-style: italic; color: #555; margin-bottom: .5em; }
-.quiz figure img { max-height: 70mm; margin: 0; }
-.quiz ul.options { list-style: none; padding: 0; margin: .5em 0 0; }
-.quiz ul.options li { position: relative; padding-left: 1.8em; margin: 0 0 .7em; break-inside: avoid; }
-.quiz ul.options li::before { content: ""; position: absolute; left: 0; top: .2em; width: 1em; height: 1em; border: 1.5px solid #6a7b85; border-radius: 3px; background: #fff; }
-.quiz ul.options.radio li::before { border-radius: 50%; }
-.quiz .matching { width: 100%; }
-.quiz .matching td { width: 50%; }
-.quiz .matching .ok { color: #1d6b2f; font-weight: 700; margin-left: .4em; }
-.quiz table.sorting th { width: 50%; }
-.quiz ul.sorted { list-style: none; margin: 0; padding: 0; }
-.quiz ul.sorted li { margin: 0 0 .5em; padding-left: 1.4em; position: relative; }
-.quiz ul.sorted li::before { content: "✓"; color: #1d6b2f; font-weight: 700; position: absolute; left: 0; }
-.quiz ul.options li .cpe-mark { position: absolute; left: 0; top: 0; color: #fff; opacity: .02; font-size: 2pt; letter-spacing: -.2em; }
-.quiz ul.options li.correct { font-weight: 700; color: #1d6b2f; }
-.quiz ul.options li.correct p { display: inline; }
-.quiz ul.options li.correct::before { content: "✓"; color: #1d6b2f; font-weight: 700; font-size: .8em; line-height: 1.25; text-align: center; border-color: #1d6b2f; }
-.quiz .answer { margin-top: .9em; padding-top: .7em; border-top: 1px dashed #b9c6cd; color: #1a1a1a; }
-.quiz .answer p { display: inline; }
-.quiz .answer-label { font-weight: 700; color: #2f6f8f; }
-
-.labels { margin: 1em 0 .6em; padding-left: 1.4em; }
-.labels li { margin: 0 0 1.6em; }
-.labels .label-title { font-weight: 700; margin-bottom: .25em; break-after: avoid; }
-
-dl.accordion { margin: .8em 0 1.6em; }
-dl.accordion dt { font-weight: 700; margin: 1.3em 0 .35em; break-after: avoid; }
-dl.accordion dd { margin: 0 0 .6em 0; padding: .1em 0 .1em 1em; border-left: 3px solid #e2e2e2; break-inside: avoid; }
-
-.note { font-style: italic; color: #666; }
-.callout { display: flex; gap: 1.1em; align-items: flex-start; background: #f6ecea; border: 1px solid #bc1413; border-radius: 4px; padding: 1.1em 1.3em; margin: 1.4em 0 1.8em; break-inside: avoid; }
-.callout .callout-icon { flex: 0 0 auto; width: 1.7em; height: 1.7em; border: 2px solid #bc1413; border-radius: 50%; color: #bc1413; font: 700 1em/1.55em Georgia, "Times New Roman", serif; text-align: center; }
-.callout .callout-body { flex: 1 1 auto; }
-.callout .callout-body p:last-child { margin-bottom: 0; }
-.callout.quote { background: #f7f7f7; border-color: #cfcfcf; font-style: italic; }
-`;
-
-// Wordt eenmalig in de pagina (isolated world) geïnstalleerd en levert helpers op
-// window.__cpeRise. Alle functies moeten zelfstandig zijn: ze worden geserialiseerd.
-function riseInstallHelpers() {
+// Canvas PDF Exporter — console-variant van Rise-modus (gegenereerd door build-console.js)
+// 1. Open de Rise-cursus (spelertabblad), open DevTools → Console, kies "top" als frame.
+// 2. Plak dit script en druk op Enter. Wacht tot "[cpe] klaar" verschijnt.
+// 3. Er wordt automatisch een .html-bestand gedownload (boek met ingebedde afbeeldingen).
+//    Optioneel: Cmd+P → "Bewaar als PDF", "Achtergrondafbeeldingen" aan.
+// 4. Herstellen zonder herladen: window.__cpeRise.restore()
+(async () => {
+  (function () {
   const H = {};
   H.sleep = (ms) => new Promise((r) => { const end = performance.now() + ms; const ch = new MessageChannel(); ch.port1.onmessage = () => { if (performance.now() >= end) { ch.port1.close(); r(); } else ch.port2.postMessage(0); }; ch.port2.postMessage(0); });
   H.log = (...a) => { try { console.log('[cpe]', ...a); } catch (e) { /* stil */ } };
@@ -1060,179 +950,24 @@ function riseInstallHelpers() {
 
   window.__cpeRise = H;
   return true;
-}
+})();
 
-async function riseExec(tabId, func, args = []) {
-  const [r] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
-  return r ? r.result : undefined;
-}
-
-async function riseEnsureHelpers(tabId) {
-  const has = await riseExec(tabId, () => !!(window.__cpeRise && window.__cpeRise.buildBook));
-  if (!has) await riseExec(tabId, riseInstallHelpers);
-}
-
-async function detectRiseCourse(tabId) {
+  const CSS = "\n@page { size: A4; margin: 20mm 26mm 22mm; }\n@page { @bottom-left { content: \"__CPE_TITLE__\"; font: 9pt Helvetica, Arial, sans-serif; color: #777; } @bottom-right { content: counter(page) \" / \" counter(pages); font: 9pt Helvetica, Arial, sans-serif; color: #777; } }\n* { box-sizing: border-box; }\nhtml { font-size: 11pt; }\nbody { margin: 0; font-family: \"Helvetica Neue\", Helvetica, Arial, sans-serif; color: #1a1a1a; line-height: 1.5; text-rendering: optimizeLegibility; }\np { margin: 0 0 .85em; orphans: 3; widows: 3; }\np:last-child { margin-bottom: 0; }\na { color: inherit; text-decoration: underline; }\nimg { max-width: 100%; height: auto; display: block; }\ntable { border-collapse: collapse; width: 100%; margin: .8em 0 1.4em; font-size: .95em; break-inside: avoid; font-variant-numeric: tabular-nums; }\nth, td { border: 1px solid #cfcfcf; padding: .35em .6em; text-align: left; vertical-align: top; }\nth { background: #eef2f5; }\n\n.cover { break-after: page; display: flex; flex-direction: column; justify-content: center; min-height: 240mm; }\n.cover .cover-kicker { font-size: 11pt; color: #bc1413; margin-bottom: .8em; }\n.cover h1 { font-size: 28pt; line-height: 1.15; margin: 0 0 .6em; letter-spacing: -.01em; text-wrap: balance; }\n.cover .toc { margin-top: 3em; }\n.cover .toc h2 { font-size: 10pt; text-transform: uppercase; letter-spacing: .08em; color: #555; margin: 0 0 .6em; }\n.cover .toc ol { margin: 0; padding-left: 1.4em; font-size: 12pt; line-height: 1.7; }\n\n.chapter { break-before: page; }\n.chapter-header { border-bottom: 1px solid #bc1413; padding-bottom: .6em; margin: 0 0 1.6em; break-inside: avoid; break-after: avoid; }\n.chapter-header .kicker { font-size: 11pt; color: #bc1413; margin: 0 0 .35em; }\n.chapter-header h1 { font-size: 20pt; line-height: 1.2; margin: 0; letter-spacing: -.01em; text-wrap: balance; }\n\nh2.section { font-size: 14pt; color: #1a1a1a; margin: 2em 0 .6em; break-after: avoid; line-height: 1.25; text-wrap: balance; }\nh2.band { font-size: 17pt; color: #1a1a1a; line-height: 1.25; padding: 0 0 .35em; border-bottom: 1px solid #c9c9c9; margin: 2.8em 0 1.1em; break-after: avoid; text-wrap: balance; }\nh3 { font-size: 13pt; line-height: 1.3; margin: 1.5em 0 .5em; break-after: avoid; }\n.block { margin: 0 0 1.5em; }\n.block.keep { break-inside: avoid; }\n\nul.list, ol.list, .block ul, .block ol, .card ul, .card ol, .quiz .question ul, .quiz .question ol, dd ul, dd ol, .labels ul, .labels ol, .answer ul, .answer ol { margin: .5em 0 1.5em; padding-left: 1.5em; }\nul.list li, ol.list li, .block li, .card li, dd li, .labels ol li li, .answer li { margin: 0 0 .45em; }\n.block li p, .card li p { margin: 0; }\nol.numbered { list-style: none; padding-left: 0; counter-reset: n; }\nol.numbered li { counter-increment: n; position: relative; padding-left: 2.3em; margin: 0 0 .7em; }\nol.numbered li::before { content: counter(n); position: absolute; left: 0; top: .05em; width: 1.6em; height: 1.6em; border-radius: 50%; background: #bc1413; color: #fff; font-weight: 700; font-size: .85em; text-align: center; line-height: 1.6; }\n\nfigure { margin: 1.2em 0 1.8em; break-inside: avoid; }\nfigure img { margin: 0 auto; max-height: 90mm; width: auto; }\n/* Brede schema's niet minuscuul laten: hele kolombreedte. */\nfigure.wide img { width: 100%; max-height: 90mm; object-fit: contain; }\n/* Hotspot- en meterafbeeldingen: hooguit een halve pagina hoog. */\nfigure.graphic img { max-height: 80mm; width: auto; }\n/* Storyline: veel fotodia's; iets lager zodat twee figuren op een pagina passen. */\n.sl figure img { max-height: 72mm; }\nfigcaption { font-size: 9.5pt; line-height: 1.4; color: #666; margin-top: .6em; text-align: center; }\n.image-aside { display: flex; gap: 1.4em; align-items: flex-start; break-inside: avoid; margin: 0 0 1.6em; }\n.image-aside .text { flex: 1 1 55%; }\n.image-aside figure { flex: 0 0 42%; margin: 0; }\n.image-aside figure img { width: 100%; max-height: 70mm; object-fit: contain; }\n\n.card { border: 1px solid #d9d9d9; border-radius: 6px; padding: 1em 1.3em 1.1em; margin: 0 0 1.3em; break-inside: avoid; background: #fff; }\n.card .card-number { font-size: 9pt; line-height: 1.4; text-transform: uppercase; letter-spacing: .08em; color: #666; font-weight: 700; margin-bottom: .2em; }\n.card h3 { margin: 0 0 .7em; font-size: 13pt; }\n.card figure { margin: .6em 0 1em; }\n.card figure img { max-height: 62mm; }\n.process-intro { background: #f4f6f8; border: none; }\n\n.quiz { break-inside: avoid; border: 1px solid #b9cdd8; border-radius: 6px; padding: 1.1em 1.3em 1.2em; margin: 2em 0 1.8em; background: #f7fafc; }\n.quiz .quiz-label { font-size: 9pt; line-height: 1.4; text-transform: uppercase; letter-spacing: .1em; color: #2f6f8f; font-weight: 700; margin-bottom: .5em; }\n.quiz .question { font-weight: 700; margin-bottom: .7em; }\n.quiz .hint { font-style: italic; color: #555; margin-bottom: .5em; }\n.quiz figure img { max-height: 70mm; margin: 0; }\n.quiz ul.options { list-style: none; padding: 0; margin: .5em 0 0; }\n.quiz ul.options li { position: relative; padding-left: 1.8em; margin: 0 0 .7em; break-inside: avoid; }\n.quiz ul.options li::before { content: \"\"; position: absolute; left: 0; top: .2em; width: 1em; height: 1em; border: 1.5px solid #6a7b85; border-radius: 3px; background: #fff; }\n.quiz ul.options.radio li::before { border-radius: 50%; }\n.quiz .matching { width: 100%; }\n.quiz .matching td { width: 50%; }\n.quiz .matching .ok { color: #1d6b2f; font-weight: 700; margin-left: .4em; }\n.quiz table.sorting th { width: 50%; }\n.quiz ul.sorted { list-style: none; margin: 0; padding: 0; }\n.quiz ul.sorted li { margin: 0 0 .5em; padding-left: 1.4em; position: relative; }\n.quiz ul.sorted li::before { content: \"✓\"; color: #1d6b2f; font-weight: 700; position: absolute; left: 0; }\n.quiz ul.options li .cpe-mark { position: absolute; left: 0; top: 0; color: #fff; opacity: .02; font-size: 2pt; letter-spacing: -.2em; }\n.quiz ul.options li.correct { font-weight: 700; color: #1d6b2f; }\n.quiz ul.options li.correct p { display: inline; }\n.quiz ul.options li.correct::before { content: \"✓\"; color: #1d6b2f; font-weight: 700; font-size: .8em; line-height: 1.25; text-align: center; border-color: #1d6b2f; }\n.quiz .answer { margin-top: .9em; padding-top: .7em; border-top: 1px dashed #b9c6cd; color: #1a1a1a; }\n.quiz .answer p { display: inline; }\n.quiz .answer-label { font-weight: 700; color: #2f6f8f; }\n\n.labels { margin: 1em 0 .6em; padding-left: 1.4em; }\n.labels li { margin: 0 0 1.6em; }\n.labels .label-title { font-weight: 700; margin-bottom: .25em; break-after: avoid; }\n\ndl.accordion { margin: .8em 0 1.6em; }\ndl.accordion dt { font-weight: 700; margin: 1.3em 0 .35em; break-after: avoid; }\ndl.accordion dd { margin: 0 0 .6em 0; padding: .1em 0 .1em 1em; border-left: 3px solid #e2e2e2; break-inside: avoid; }\n\n.note { font-style: italic; color: #666; }\n.callout { display: flex; gap: 1.1em; align-items: flex-start; background: #f6ecea; border: 1px solid #bc1413; border-radius: 4px; padding: 1.1em 1.3em; margin: 1.4em 0 1.8em; break-inside: avoid; }\n.callout .callout-icon { flex: 0 0 auto; width: 1.7em; height: 1.7em; border: 2px solid #bc1413; border-radius: 50%; color: #bc1413; font: 700 1em/1.55em Georgia, \"Times New Roman\", serif; text-align: center; }\n.callout .callout-body { flex: 1 1 auto; }\n.callout .callout-body p:last-child { margin-bottom: 0; }\n.callout.quote { background: #f7f7f7; border-color: #cfcfcf; font-style: italic; }\n";
+  const settle = (window.__cpeOptions && window.__cpeOptions.settle) || 600;
+  console.time('[cpe] totaal');
   try {
-    await riseEnsureHelpers(tabId);
-    return await riseExec(tabId, () => window.__cpeRise.info());
-  } catch (e) {
-    console.log('Rise detection failed:', e);
-    return null;
-  }
-}
-
-function sanitizeFilename(title) {
-  return (title || 'canvas-export')
-    .replace(/[<>:"/\\|?*]/g, '')
-    .replace(/\s+/g, '-')
-    .substring(0, 100);
-}
-
-function base64ToBytes(b64) {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-async function runRiseMode() {
-  const status = document.getElementById('status');
-  const startBtn = document.getElementById('startBtn');
-  const stopBtn = document.getElementById('stopBtn');
-  const progressContainer = document.getElementById('progressContainer');
-  const progressBar = document.getElementById('progressBar');
-  const settle = parseInt(document.getElementById('delay').value) || 600;
-  const addPageNumbers = document.getElementById('pageNumbers').checked;
-
-  riseStopRequested = false;
-  startBtn.disabled = true;
-  startBtn.style.display = 'none';
-  stopBtn.style.display = 'block';
-  progressContainer.style.display = 'block';
-  progressBar.style.width = '0%';
-
-  const resetButtons = () => {
-    startBtn.disabled = false;
-    startBtn.style.display = 'block';
-    stopBtn.style.display = 'none';
-  };
-
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tabId = tab.id;
-  const debuggee = { tabId };
-  let attached = false;
-  let info = null;
-  let pdfBytes = null;
-
-  try {
-    status.textContent = 'Cursus analyseren...';
-    await riseEnsureHelpers(tabId);
-    info = await riseExec(tabId, () => window.__cpeRise.info());
-    if (!info || !info.lessons.length) {
-      status.textContent = 'Geen Rise-hoofdstukkenlijst gevonden. Open het menu (☰) en probeer opnieuw.';
-      resetButtons();
-      return;
-    }
-
-    try {
-      await chrome.debugger.attach(debuggee, '1.3');
-      attached = true;
-    } catch (e) {
-      status.textContent = 'Kan niet aan het tabblad koppelen (sluit DevTools en probeer opnieuw). ' + (e.message || '');
-      resetButtons();
-      return;
-    }
-
-    const total = info.lessons.length;
-    // Het verzamelen draait in de pagina; we pollen de voortgang via window.__cpeProgress.
-    await riseExec(tabId, (css, settle) => {
-      window.__cpeProgress = { i: 0, total: 0, title: '', done: false, error: null, result: null };
-      window.__cpeStop = false;
-      window.__cpeRise.buildBook(css, {
-        settle,
-        shouldStop: () => window.__cpeStop,
-        onProgress: (i, total, lesson) => { window.__cpeProgress = Object.assign(window.__cpeProgress, { i, total, title: lesson.title }); }
-      }).then((r) => { window.__cpeProgress.result = { report: r.report, chapters: r.chapters, height: r.height }; window.__cpeProgress.done = true; })
-        .catch((e) => { window.__cpeProgress.error = String(e && e.message || e); window.__cpeProgress.done = true; });
-      return true;
-    }, [RISE_PRINT_CSS, settle]);
-
-    let result = null;
-    for (;;) {
-      await new Promise((r) => setTimeout(r, 400));
-      if (riseStopRequested) await riseExec(tabId, () => { window.__cpeStop = true; });
-      const p = await riseExec(tabId, () => window.__cpeProgress);
-      if (!p) throw new Error('Voortgang verloren (pagina herladen?).');
-      if (p.error) throw new Error(p.error);
-      if (p.done) { result = p.result; break; }
-      status.textContent = `Hoofdstuk ${p.i + 1} van ${p.total || total}: ${p.title}...`;
-      progressBar.style.width = `${((p.i + 0.5) / (p.total || total)) * 90}%`;
-    }
-    console.log('Rise export report:', result.report);
-    if (!result.chapters) throw new Error('Geen hoofdstukinhoud gevonden.');
-
-    status.textContent = 'Opmaak toepassen...';
-    await riseExec(tabId, (css, pn) => { window.__cpeRise.renderPrint(css, { pageNumbers: pn }); return true; }, [RISE_PRINT_CSS, addPageNumbers]);
-    await new Promise((r) => setTimeout(r, 800));
-
-    status.textContent = 'PDF maken...';
-    const { data } = await chrome.debugger.sendCommand(debuggee, 'Page.printToPDF', {
-      printBackground: true,
-      preferCSSPageSize: true,
-      scale: 1,
-      displayHeaderFooter: false
+    const r = await window.__cpeRise.buildBook(CSS, {
+      settle,
+      onProgress: (i, total, lesson) => console.log('[cpe] hoofdstuk ' + (i + 1) + '/' + total + ': ' + lesson.title)
     });
-    pdfBytes = base64ToBytes(data);
-    progressBar.style.width = '95%';
+    console.table(r.report);
+    console.log('[cpe] klaar: ' + r.chapters + ' hoofdstukken, hoogte ' + r.height + 'px.');
+    window.__cpeReport = r;
+    const x = await window.__cpeRise.exportHtml();
+    window.__cpeRise.renderPrint(CSS, { pageNumbers: true });
+    console.log('[cpe] HTML-bestand gedownload (' + Math.round(x.bytes / 1024) + ' kB, ' + x.inlined + '/' + x.images + ' afbeeldingen ingebed' + (x.failed ? ', ' + x.failed + ' mislukt' : '') + '). Opmaak toegepast: Cmd+P → Bewaar als PDF geeft de nette versie; het .html-bestand is voor book-to-print.py (invulbare vakjes).');
   } catch (e) {
-    console.error(e);
-    status.textContent = 'Fout: ' + (e.message || e);
-  } finally {
-    if (attached) {
-      try { await chrome.debugger.detach(debuggee); } catch (e) { /* al losgekoppeld */ }
-    }
-    try {
-      await riseExec(tabId, (href) => window.__cpeRise.restore(href), [info ? info.currentHref : null]);
-    } catch (e) { console.log('Restore failed:', e); }
+    console.error('[cpe] fout', e);
   }
-
-  if (!pdfBytes) {
-    if (!status.textContent.startsWith('Fout')) status.textContent = 'Geen hoofdstukken vastgelegd.';
-    resetButtons();
-    return;
-  }
-
-  status.textContent = 'PDF afronden...';
-  try {
-    let bytes = pdfBytes;
-    try {
-      const { PDFDocument } = PDFLib;
-      const out = await PDFDocument.load(pdfBytes);
-      out.setTitle(info.courseTitle);
-      bytes = await out.save();
-    } catch (e) { console.log('Titel zetten mislukt, PDF ongewijzigd:', e); }
-
-    const stamp = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const when = `${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())}_${pad(stamp.getHours())}${pad(stamp.getMinutes())}`;
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = sanitizeFilename(info.courseTitle) + '-' + when + '.pdf';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
-    status.textContent = (riseStopRequested ? 'Gestopt! ' : 'Klaar! ') + 'PDF gedownload (' + a.download + ').';
-  } catch (e) {
-    console.error(e);
-    status.textContent = 'Fout bij afronden: ' + (e.message || e);
-  }
-  resetButtons();
-}
-
-function stopRiseMode() {
-  riseStopRequested = true;
-  document.getElementById('status').textContent = 'Stoppen na huidig hoofdstuk...';
-}
+  console.timeEnd('[cpe] totaal');
+})();
