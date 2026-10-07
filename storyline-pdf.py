@@ -157,6 +157,8 @@ class Course:
         vt = item['vartext']
         base = ((vt.get('defaultBlockStyle') or {}).get('baseSpanStyle') or {}).get('fontSize') or 0
         blocks = []
+        dstyle = vt.get('defaultBlockStyle') or {}
+        prev_after = None  # spacingAfter van het vorige niet-lege blok; None na een lege regel of aan het begin
         for b in vt.get('blocks') or []:
             spans = []
             for sp in b.get('spans') or []:
@@ -164,12 +166,17 @@ class Course:
                 spans.append({'text': decode(sp.get('text') or ''), 'bold': bool(st.get('fontIsBold')),
                               'size': st.get('fontSize') or base})
             text = ''.join(s['text'] for s in spans)
-            if not norm(text):
-                continue
             style = b.get('style') or {}
+            if not norm(text):
+                prev_after = None
+                continue
+            before = style.get('spacingBefore', dstyle.get('spacingBefore', 0)) or 0
             lst = (style.get('listStyle') or {}).get('listType') or 'none'
+            # 'tight': geen lege regel en geen alinea-afstand t.o.v. het vorige blok -> op de dia gewoon de volgende regel
             blocks.append({'spans': spans, 'text': text, 'size': max([base] + [s['size'] for s in spans]),
-                           'list': lst, 'level': style.get('listLevel') or 0})
+                           'list': lst, 'level': style.get('listLevel') or 0,
+                           'tight': prev_after == 0 and before == 0})
+            prev_after = style.get('spacingAfter', dstyle.get('spacingAfter', 0)) or 0
         return blocks or None
 
     def image_url(self, ob):
@@ -368,6 +375,44 @@ class Course:
                                     is_choice=full in choice_texts or full.lower() in choice_texts, acc=ob.get('accType'),
                                     all_bold=all(s['bold'] for b in blocks for s in b['spans'] if norm(s['text'])),
                                     w=ob.get('width') or 0, h=ob.get('height') or 0))
+        # Losse tekst die binnen het kader van een groep met maar één tekst (de kaarttitel) ligt, hoort bij die kaart:
+        # bv. 'Voor wie?' in een gekleurd vak met de uitleg als los tekstvak erin.
+        for li, L in enumerate(sl.get('slideLayers') or []):
+            rects = {}
+            for it in self.flatten(L):
+                ob = it['ob']
+                if ob.get('objects') and it.get('gid') == ob.get('id'):
+                    rects[ob.get('id')] = (it['x'], it['y'], ob.get('width') or 0, ob.get('height') or 0)
+            texts_in = Counter(e['gid'] for e in entries if e['kind'] == 'text' and e['layer'] == li and e.get('gid'))
+            for e in entries:
+                if e['kind'] == 'text' and e['layer'] == li and e.get('gid') and CREDIT_RE.match(norm(e['text'])):
+                    texts_in[e['gid']] = 99  # foto met bronvermelding, geen kaart
+            for e in entries:
+                if e['kind'] != 'text' or e['layer'] != li or e.get('gid') or CREDIT_RE.match(norm(e['text'])):
+                    continue
+                for gid, (gx, gy, gw, gh) in rects.items():
+                    if texts_in.get(gid) == 1 and gw <= 1000 and gx - 5 <= e['x'] and e['x'] + (e.get('w') or 0) <= gx + gw + 5 \
+                            and gy - 5 <= e['y'] and e['y'] + (e.get('h') or 0) <= gy + gh + 5:
+                            e['gid'], e['gx'], e['gy'] = gid, gx, gy
+                            break
+        # Pijltjes/bolletjes als losse vormpjes links van losse tekstregels = opsomming (zoals de leerdoelen).
+        icons = []
+        if sl.get('slideLayers'):
+            for it in self.flatten(sl['slideLayers'][0]):
+                ob = it['ob']
+                w, h = ob.get('width') or 0, ob.get('height') or 0
+                if ob.get('kind') == 'vectorshape' and 8 <= w <= 60 and 8 <= h <= 60 and not self.text_blocks(ob) and not self.image_url(ob):
+                    icons.append((it['x'], it['y'], w, h))
+        if len(icons) >= 2:
+            marked = []
+            for e in entries:
+                if e['kind'] != 'text' or e['layer'] != 0 or len(e['blocks']) != 1 or e['blocks'][0]['list'] != 'none':
+                    continue
+                if any(0 <= e['x'] - (ix + iw) <= 80 and e['y'] - 10 <= iy + ih / 2 <= e['y'] + (e.get('h') or 0) + 10 for ix, iy, iw, ih in icons):
+                    marked.append(e)
+            if len(marked) >= 2 and len({round(e['x'] / 20) for e in marked}) == 1:
+                for e in marked:
+                    e['icon_bullet'] = True
         if any((it.get('type') == 'matching' or it.get('statements')) for it in interactions):
             # Sleepitems liggen op één stapel (zelfde positie en maat): het zijn antwoordstukjes, geen dia-tekst.
             spots = Counter((round(e['x']), round(e['y']), e.get('w'), e.get('h')) for e in entries if e['kind'] == 'text')
@@ -1104,6 +1149,13 @@ def slide_model(course, sid, suppress_heading=False):
             if len(e['blocks']) >= 3 and any(OPERATOR_RE.match(b['text']) for b in e['blocks']):
                 items.append({'kind': 'formula', 'text': ' '.join(norm(b['text']) for b in e['blocks'])})
                 continue
+            if e.get('icon_bullet'):
+                entry = {'runs': block_to_items(e['blocks'][0])[0][1], 'level': 0, 'tag': 'ul'}
+                if items and items[-1]['kind'] == 'list' and items[-1].get('icons'):
+                    items[-1]['items'].append(entry)
+                else:
+                    items.append({'kind': 'list', 'tag': 'ul', 'items': [entry], 'open': False, 'icons': True})
+                continue
             nxt = next((n for n in entries[entries.index(e) + 1:] if n['kind'] == 'text' and not n.get('is_choice')), None)
             if is_heading_like(e, slide_max, body_size) or is_label_before_body(e, nxt):
                 items.append({'kind': 'h3', 'text': norm(e['text'])})
@@ -1125,6 +1177,10 @@ def slide_model(course, sid, suppress_heading=False):
                                 and items and items[-1]['kind'] == 'p' \
                                 and items[-1].get('src') == e.get('id'):
                             # ingesprongen vervolgregel ('    Alle kunststof ...') hoort bij de alinea erboven
+                            items[-1]['runs'] = items[-1]['runs'] + [('\u2028', False)] + runs
+                            continue
+                        if b.get('tight') and items and items[-1]['kind'] == 'p' and items[-1].get('src') == e.get('id'):
+                            # volgende alinea zonder witregel of alinea-afstand: op de dia een nieuwe regel, geen nieuwe alinea
                             items[-1]['runs'] = items[-1]['runs'] + [('\u2028', False)] + runs
                             continue
                         items.append({'kind': 'p', 'runs': runs, 'src': e.get('id')})
