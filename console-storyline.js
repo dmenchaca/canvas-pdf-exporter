@@ -646,6 +646,15 @@
       try {
         const r = await fetch(st.base + u, { credentials: 'include' });
         if (!r.ok) continue;
+        if (/\.js$/i.test(u)) {
+          // Vectorafbeelding (assettype jssvg): een JS-bestand met de SVG als stringliteral.
+          const js = await r.text();
+          const m = /(['"])\s*<svg/.exec(js);
+          if (!m) { S.log('geen svg in', u); continue; }
+          const svg = S.decodeJsString(js, m.index)[0];
+          images[u] = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+          continue;
+        }
         if (!/^image\//.test(r.headers.get('content-type') || '')) continue;
         const b = await r.blob();
         images[u] = await new Promise((ok, err) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = err; fr.readAsDataURL(b); });
