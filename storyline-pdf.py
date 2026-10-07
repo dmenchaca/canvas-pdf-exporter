@@ -179,6 +179,21 @@ class Course:
             prev_after = style.get('spacingAfter', dstyle.get('spacingAfter', 0)) or 0
         return blocks or None
 
+    def same_picture(self, u1, u2):
+        """Twee afbeeldingen die er (nagenoeg) hetzelfde uitzien, ook als het bestand verschilt."""
+        try:
+            import base64, io
+            from PIL import Image, ImageChops, ImageStat
+            ims = []
+            for u in (u1, u2):
+                d = self.images.get(u) or ''
+                if not d.startswith('data:image/') or 'svg' in d[:30]:
+                    return False
+                ims.append(Image.open(io.BytesIO(base64.b64decode(d.split(',', 1)[1]))).convert('L').resize((64, 40)))
+            return sum(ImageStat.Stat(ImageChops.difference(*ims)).mean) < 12
+        except Exception:
+            return False
+
     def image_url(self, ob):
         il = ob.get('imagelib') or []
         if il:
@@ -502,8 +517,31 @@ def structure_entries(entries):
     texts = [e for e in entries if e['kind'] == 'text' and not e.get('is_choice')]
     used = set()
 
+    # --- één afbeelding met meerdere naast elkaar geplaatste bijschriften eronder
+    #     (bv. Pouch / Prismatische cel / Cilindrische cel onder één plaat met drie batterijen)
+    for im in [e for e in entries if e['kind'] == 'image' and (e.get('w') or 0) < 1800]:  # geen schermvullende achtergrond
+        x0, x1 = im['x'] - 60, im['x'] + (im.get('w') or 0) + 60
+        bottom = im['y'] + (im.get('h') or 0)
+        cand = [t for t in texts if id(t) not in used and t['layer'] == im['layer'] and len(norm(t['text'])) <= 60
+                and t.get('acc') != 'button' and t.get('gacc') != 'button'
+                and x0 <= t['x'] and t['x'] + (t.get('w') or 0) <= x1
+                and im['y'] + 0.6 * (im.get('h') or 0) <= t['y'] <= bottom + 150]
+        if len(cand) < 2:
+            continue
+        ys = [t['y'] for t in cand]
+        if max(ys) - min(ys) > 30 or len({round(t['x'] / 100) for t in cand}) != len(cand):
+            continue
+        cand.sort(key=lambda t: t['x'])
+        y = max(ys)
+        entries.append({'kind': 'figcaps', 'layer': im['layer'], 'x': im['x'], 'y': y, 'gx': im['x'], 'gy': y,
+                        'url': im['url'], 'w': im['w'], 'h': im['h'], 'alt': im.get('alt', ''), 'text': '', 'size': 0,
+                        'caps': [t['blocks'] for t in cand]})
+        used.add(id(im))
+        for t in cand:
+            used.add(id(t))
+
     # --- rij plaatjes met onderschrift (bv. Batterij 1,5 Volt / Stopcontact 230 Volt / ...)
-    pics = [e for e in entries if e['kind'] in ('image', 'smallimg')]
+    pics = [e for e in entries if e['kind'] in ('image', 'smallimg') and id(e) not in used]
     figs = []
     for im in pics:
         best = None
@@ -944,6 +982,16 @@ def build_quiz(course, entries, interactions, layer_ids, heading):
             continue
         cleaned.append((kind, runs, tag))
     fb_items = strip_check_lead(cleaned)
+    # Afbeeldingen in de 'juist'-laag (bv. de grafiek bij de toelichting) horen bij de toelichting.
+    fb_images, seen_fb = [], set()
+    for li, lid in layer_ids.items():
+        if lid in right_layers:
+            for e in entries:
+                if e['kind'] == 'image' and e['layer'] == li and e['url'] not in seen_fb:
+                    seen_fb.add(e['url'])
+                    if any(o['kind'] == 'image' and o['layer'] == 0 and course.same_picture(o['url'], e['url']) for o in entries):
+                        continue  # zelfde foto als bij de vraag (vaak een iets andere uitsnede)
+                    fb_images.append({'url': e['url'], 'w': e['w'], 'h': e['h'], 'alt': e.get('alt', '')})
 
     used = IdSet()
     quizzes = []
@@ -951,7 +999,8 @@ def build_quiz(course, entries, interactions, layer_ids, heading):
         kind = it.get('type') or ''
         lms = it.get('lmsId') or ''
         q = {'kind': 'quiz', 'type': kind, 'question': [], 'options': [], 'pairs': [], 'answers': [], 'prompt': None,
-             'feedback': fb_items if it is interactions[-1] else []}
+             'feedback': fb_items if it is interactions[-1] else [],
+             'fb_images': fb_images if it is interactions[-1] else []}
         # Vraagtekst: tekst die op '?' eindigt, anders de eerste basistekst.
         qe = next((e for e in base_texts if re.search(r'\?\s*$', e['text']) and e not in used), None) or \
             next((e for e in base_texts if e not in used), None) or heading
@@ -1190,6 +1239,9 @@ def slide_model(course, sid, suppress_heading=False):
             items.append({'kind': 'labelrows', 'rows': [(lab, [it for b in blocks for it in block_to_items(b)]) for lab, blocks in e['rows']]})
         elif e['kind'] == 'table':
             items.append({'kind': 'table', 'rows': [[[it for b in cell for it in block_to_items(b)] for cell in row] for row in e['rows']]})
+        elif e['kind'] == 'figcaps':
+            items.append({'kind': 'figcaps', 'url': e['url'], 'w': e['w'], 'h': e['h'], 'alt': e['alt'],
+                          'caps': [[it for b in blocks for it in block_to_items(b)] for blocks in e['caps']]})
         elif e['kind'] == 'figrow':
             items.append({'kind': 'figrow', 'figs': [dict(f, items=[it for b in f['blocks'] for it in block_to_items(b)]) for f in e['figs']]})
         elif e['kind'] == 'cards':
@@ -1257,7 +1309,7 @@ def slide_model(course, sid, suppress_heading=False):
             rest = [x for x in items if x['kind'] not in ('h2', 'caption', 'image')]
             if rest and all(x['kind'] in ('p', 'list', 'h3') for x in rest):
                 items = head + [{'kind': 'aside', 'items': rest, 'image': img, 'captions': [c['text'] for c in caps]}]
-    signature = norm(' '.join(item_text(x) for x in items if x['kind'] in ('h2', 'h3', 'p', 'list', 'labelrows', 'cards', 'aside', 'figrow', 'overview', 'table', 'popup')))
+    signature = norm(' '.join(item_text(x) for x in items if x['kind'] in ('h2', 'h3', 'p', 'list', 'labelrows', 'cards', 'aside', 'figrow', 'figcaps', 'overview', 'table', 'popup')))
     return items, (norm(heading['text']) if heading is not None else ''), signature
 
 
@@ -1280,6 +1332,8 @@ def item_text(x):
         return ' '.join(item_text(i) for i in x['items']) + ' ' + ' '.join(x.get('captions') or [])
     if k == 'figrow':
         return ' '.join(bi(f['items']) for f in x['figs'])
+    if k == 'figcaps':
+        return ' '.join(bi(c) for c in x['caps'])
     if k == 'table':
         return ' '.join(bi(cell) for row in x['rows'] for cell in row)
     if k == 'overview':
@@ -1311,7 +1365,7 @@ def dedupe_within_chapter(body):
             if not keep:
                 continue
             x = dict(x, items=keep)
-        elif k in ('popup', 'aside', 'cards', 'labelrows', 'table', 'figrow'):
+        elif k in ('popup', 'aside', 'cards', 'labelrows', 'table', 'figrow', 'figcaps'):
             key = kk(item_text(x))
             if len(key) >= 40 and key in seen:
                 continue
@@ -1706,6 +1760,13 @@ def flowable_for(it, S, W):
         return KeepTogether([Paragraph(' — '.join(' '.join(runs_to_markup(r) for _, r, _ in cell) for cell in row), S['body']) for row in it['rows']])
     if k == 'overview':
         return Paragraph('<b>In dit hoofdstuk:</b> ' + ', '.join(esc(t) for t in it['topics']), S['body'])
+    if k == 'figcaps':
+        fl = []
+        img = flowable_for({'kind': 'image', 'data': it.get('data'), 'w': it['w'], 'h': it['h']}, S, W)
+        if img is not None:
+            fl.append(img)
+        fl.append(Paragraph(' | '.join(' '.join(runs_to_markup(r) for _, r, _ in c) for c in it['caps']), S['caption']))
+        return KeepTogether(fl)
     if k == 'figrow':
         fl = []
         for f in it['figs']:
@@ -1863,6 +1924,9 @@ def h_quiz(q):
         fb = []
         for kind, runs, tag in merge_broken_tuples(q['feedback']):
             fb.append(('<p>• ' if kind == 'li' else '<p>') + h_runs(runs) + '</p>')
+        for im in q.get('fb_images') or []:
+            if im.get('data'):
+                fb.append('<figure class="fb-image"><img src="%s" alt="%s"></figure>' % (im['data'], esc(im.get('alt', ''))))
         body.append('<div class="answer"><span class="answer-label">%s:</span> %s</div>' % (
             'Voorbeeldantwoord' if q.get('open') else 'Toelichting', ''.join(fb)))
     return '<div class="quiz">' + ''.join(body) + '</div>'
@@ -1906,6 +1970,10 @@ def h_item(it):
         return '<table class="sltable">%s</table>' % rows
     if k == 'overview':
         return '<div class="overview"><div class="ov-head">In dit hoofdstuk</div><ul>%s</ul></div>' % ''.join('<li>%s</li>' % esc(t) for t in it['topics'])
+    if k == 'figcaps':
+        caps = ''.join('<div>%s</div>' % h_blockitems(c, merge=False) for c in it['caps'])
+        img = '<img src="%s" alt="%s">' % (it['data'], esc(it.get('alt', ''))) if it.get('data') else ''
+        return '<figure class="figcaps">%s<div class="caps n%d">%s</div></figure>' % (img, min(len(it['caps']), 5), caps)
     if k == 'figrow':
         figs = ''.join('<figure><div class="ph"><img src="%s" alt="%s"></div><figcaption>%s</figcaption></figure>'
                        % (f['data'], esc(f.get('alt', '')), h_blockitems(f['items'], merge=False)) for f in it['figs'] if f.get('data'))
@@ -2014,6 +2082,16 @@ def render_html(chapters, title, version=''):
             '\n.popup .pu-body p:last-child { margin-bottom: 0; }'
             '\n.keep-pair { break-inside: avoid; }'
             '\n.quiz figure.solution { margin: .6em 0 .9em; }'
+            '\n.quiz .answer figure.fb-image { margin: .6em 0 0; }'
+            '\nfigure.figcaps { margin: .8em 0 1.1em; break-inside: avoid; }'
+            '\nfigure.figcaps img { width: 100%; height: auto; display: block; }'
+            '\nfigure.figcaps .caps { display: grid; gap: 4mm; margin-top: .4em; text-align: center; font-size: .92em; }'
+            '\nfigure.figcaps .caps.n2 { grid-template-columns: repeat(2, 1fr); }'
+            '\nfigure.figcaps .caps.n3 { grid-template-columns: repeat(3, 1fr); }'
+            '\nfigure.figcaps .caps.n4 { grid-template-columns: repeat(4, 1fr); }'
+            '\nfigure.figcaps .caps.n5 { grid-template-columns: repeat(5, 1fr); }'
+            '\nfigure.figcaps .caps p { margin: 0; }'
+            '\n.quiz .answer figure.fb-image img { max-height: 75mm; max-width: 100%; }'
             '\n.quiz figure.solution img { max-height: 80mm; margin: 0 auto; }'
             '\n.quiz figure.solution figcaption { color: #1d6b2f; font-weight: 700; }'
             '\n.sl .quiz .answer p + p { display: block; margin: .5em 0 0; }'
@@ -2071,6 +2149,11 @@ def main():
             if it['kind'] == 'figrow':
                 for f in it['figs']:
                     f['data'] = course.images.get(f['url'], '')
+            if it['kind'] == 'figcaps':
+                it['data'] = course.images.get(it['url'], '')
+            if it['kind'] == 'quiz':
+                for im in it.get('fb_images') or []:
+                    im['data'] = course.images.get(im['url'], '')
             if it['kind'] == 'quiz' and it.get('solution'):
                 it['solution']['data'] = course.images.get(it['solution']['url'], '')
     if a.model:
