@@ -63,6 +63,23 @@ OPERATOR_RE = re.compile(r'^\s*[=+\-–×x:/]\s*$')
 NAV_WORD_RE = re.compile(r'^(menu|volgende|vorige|terug|next|previous|back|sluiten|close|verder|start|submit|'
                          r'verzenden|indienen|ok|oké|afspelen|play|pauze|pause|opnieuw|herhalen|replay|doorgaan|'
                          r'antwoord indienen|controleer|controleren|begrippenlijst|bronnenlijst|bronnen|feedback)$', re.I)
+# Zinnen die alleen over het navigeren in de speler gaan (in een PDF zinloos).
+NAV_SENTENCE_RE = re.compile(
+    r'^(je hebt (het onderdeel|dit onderdeel|dit hoofdstuk|deze e-module|de e-module)\b.*\b(afgerond|doorlopen)'
+    r'|klik op (de knop|de pijl|volgende|vorige)\b.*\b(keuzemenu|menu|hoofdmenu|te gaan|af te ronden|verder)'
+    r'|zodra je alle hoofdstukken.*\bkeuzemenu\b.*'
+    r'|ga (terug )?naar (het )?(keuzemenu|hoofdmenu|menu)\b'
+    r'|je kunt (de|deze) e-module (hieronder |nu )?afsluiten'
+    r'|(of )?je kunt (het|dit) (scherm|tabblad)( in je browser)? (nu )?sluiten'
+    r'|je bent aan het (eind|einde) van (deze|de) e-module gekomen'
+    r'|e-module afsluiten)[.!]?$', re.I)
+
+
+def is_nav_only(text):
+    sentences = [x for x in re.split(r'(?<=[.!?])\s+', norm(text)) if x]
+    return bool(sentences) and all(NAV_SENTENCE_RE.match(x) for x in sentences)
+
+
 DOTS_RE = re.compile(r'^[\s.…_\-]+$')
 LABEL_PREFIX_RE = re.compile(r'^(invulvak|sleepitem|picture|rectangle|oval|hotspot|freeform|shape|image|afbeelding|drop|drag|item)\s*\d*\s*[-:]\s*', re.I)
 TUTORIAL_RE = re.compile(r'(deze knop|deze buttons?|met deze knoppen|navigeren|navigatie|via het menu|sluit de uitleg|'
@@ -286,6 +303,9 @@ class Course:
                     alt = ((ob.get('imagelib') or [{}])[0]).get('altText') or ''
                     entries.append(dict(base, kind='image', url=url, w=ob.get('width') or 0, h=ob.get('height') or 0, alt=norm(alt)))
                 blocks = self.text_blocks(ob)
+                if blocks:
+                    # Losse navigatie-alinea's binnen een tekstvak ('Klik op volgende om naar X te gaan.').
+                    blocks = [b for b in blocks if not is_nav_only(b['text'])] or None
                 if not blocks:
                     continue
                 if ob.get('accType') == 'button':
@@ -293,6 +313,8 @@ class Course:
                 full = norm(' '.join(b['text'] for b in blocks))
                 if self.is_chrome_text(full):
                     continue
+                if is_nav_only(full):
+                    continue  # 'Je hebt het onderdeel X afgerond', 'Klik op volgende om ...' e.d.
                 if it.get('gacc') == 'button' and re.search(r'navigat', full, re.I):
                     continue  # kaart-knop die de uitleg over de spelerknoppen opent
                 if ('t:' + full) in seen:
