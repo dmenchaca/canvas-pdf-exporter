@@ -167,7 +167,11 @@ class Course:
             spans = []
             for sp in b.get('spans') or []:
                 st = sp.get('style') or {}
-                spans.append({'text': decode(sp.get('text') or ''), 'bold': bool(st.get('fontIsBold')),
+                fam = (st.get('fontFamily') or '').split(',')[0]
+                # Storyline zet vet vaak via de fontnaam ('Akkurat ProBold') i.p.v. fontIsBold
+                spans.append({'text': decode(sp.get('text') or ''),
+                              'bold': bool(st.get('fontIsBold')) or bool(re.search(r'bold|black|heavy', fam, re.I)),
+                              'attr_bold': bool(st.get('fontIsBold')),  # voor structuur (kopherkenning) ongewijzigd
                               'size': st.get('fontSize') or base})
             text = ''.join(s['text'] for s in spans)
             style = b.get('style') or {}
@@ -179,6 +183,7 @@ class Course:
             # 'tight': geen lege regel en geen alinea-afstand t.o.v. het vorige blok -> op de dia gewoon de volgende regel
             blocks.append({'spans': spans, 'text': text, 'size': max([base] + [s['size'] for s in spans]),
                            'list': lst, 'level': style.get('listLevel') or 0,
+                           'start': (style.get('listStyle') or {}).get('start'),
                            'tight': prev_after == 0 and before == 0})
             prev_after = style.get('spacingAfter', dstyle.get('spacingAfter', 0)) or 0
         return blocks or None
@@ -413,7 +418,7 @@ class Course:
                 seen.add('t:' + full)
                 entries.append(dict(base, kind='text', blocks=blocks, text=full, size=max(b['size'] for b in blocks), popup_title=popup_title,
                                     is_choice=full in choice_texts or full.lower() in choice_texts, acc=ob.get('accType'),
-                                    all_bold=all(s['bold'] for b in blocks for s in b['spans'] if norm(s['text'])),
+                                    all_bold=all(s.get('attr_bold', s['bold']) for b in blocks for s in b['spans'] if norm(s['text'])),
                                     w=ob.get('width') or 0, h=ob.get('height') or 0))
         # Losse tekst die binnen het kader van een groep met maar één tekst (de kaarttitel) ligt, hoort bij die kaart:
         # bv. 'Voor wie?' in een gekleurd vak met de uitleg als los tekstvak erin.
@@ -587,10 +592,22 @@ def structure_entries(entries):
     bands = {}
     for im, t in figs:
         bands.setdefault((im['layer'], round(im['y'] / 120)), []).append((im, t))
+    # Foto's met onderschrift die verspringend in een raster staan (2x2): samen één fotorij per laag.
+    per_layer = {}
+    for im, t in figs:
+        per_layer.setdefault(im['layer'], []).append((im, t))
+    for layer, fs in per_layer.items():
+        if len(fs) >= 3 and all(len(v) < 2 for (l, _), v in bands.items() if l == layer):
+            for key in [k for k in bands if k[0] == layer]:
+                del bands[key]
+            bands[(layer, 'grid')] = fs
     for (layer, _), fs in bands.items():
         if len(fs) < 2 or len({id(t) for _, t in fs}) != len(fs):
             continue
-        fs.sort(key=lambda it: it[0]['x'])
+        if layer_key_grid := any(k == (layer, 'grid') for k in [(layer, _)]):
+            fs.sort(key=lambda it: (tag_start((block_to_items(it[1]['blocks'][0]) or [('', '', '')])[0][2]) or 1, it[0]['y'], it[0]['x']))
+        else:
+            fs.sort(key=lambda it: it[0]['x'])
         i0 = fs[0][0]
         entries.append({'kind': 'figrow', 'layer': layer, 'x': i0['x'], 'y': i0['y'], 'gx': i0['x'], 'gy': i0['y'], 'text': '', 'size': 0,
                         'figs': [{'url': im['url'], 'alt': im.get('alt', ''), 'w': im['w'], 'h': im['h'], 'blocks': t['blocks']} for im, t in fs]})
@@ -793,11 +810,19 @@ def runs_to_markup(runs):
 
 
 def split_tag(tag):
-    """'ul' -> ('ul', 0); 'ol:1' -> ('ol', 1)."""
+    """'ul' -> ('ul', 0); 'ol:1' -> ('ol', 1); een '@3' (startnummer) wordt genegeerd, zie tag_start."""
+    if tag and '@' in tag:
+        tag = tag.split('@', 1)[0]
     if tag and ':' in tag:
         b, l = tag.split(':', 1)
         return b, int(l)
     return tag, 0
+
+
+def tag_start(tag):
+    """Startnummer van een genummerde lijst ('ol@3' -> 3), anders None."""
+    m = re.search(r'@(\d+)$', tag or '')
+    return int(m.group(1)) if m else None
 
 
 def block_to_items(block):
@@ -808,7 +833,8 @@ def block_to_items(block):
     if lst != 'none':
         tag = 'ol' if re.search(r'number|decimal|arabic|letter|roman', lst, re.I) else 'ul'
         level = int(block.get('level') or 0)
-        return [('li', runs_of([block]), tag + (':%d' % level if level else ''))]
+        start = block.get('start') if tag == 'ol' else None
+        return [('li', runs_of([block]), tag + (':%d' % level if level else '') + ('@%d' % start if start and start > 1 else ''))]
     if lines and all(BULLET_RE.match(l) for l in lines):
         return [('li', [(BULLET_RE.sub('', l), False)], 'ul') for l in lines]
     if len(lines) > 1 and any(BULLET_RE.match(l) for l in lines):
@@ -1161,7 +1187,8 @@ def slide_model(course, sid, suppress_heading=False):
     heading = None
     cands = [e for e in texts if e['layer'] == 0 and e['size'] >= 30 and len(e['text']) <= 120
              and not re.match(r'^[\d.\s]+$', e['text']) and len(e['blocks']) == 1
-             and not re.search(r'[.:;,!]$', norm(e['text'])) and not INSTRUCTION_RE.match(norm(e['text']))
+             and not re.search(r'[.:;,!]$', norm(e['text']))
+             and not (INSTRUCTION_RE.match(norm(e['text'])) and not re.search(r'\?\s*$', norm(e['text'])))
              and not CREDIT_RE.match(norm(e['text']))]
     if interactions or any(e['kind'] == 'input' for e in entries):
         cands = [e for e in cands if not re.search(r'\?\s*$', norm(e['text']))]
@@ -1238,7 +1265,7 @@ def slide_model(course, sid, suppress_heading=False):
                 for kind, runs, tag in block_to_items(b):
                     if kind == 'li':
                         base, level = split_tag(tag)
-                        entry = {'runs': runs, 'level': level, 'tag': base}
+                        entry = {'runs': runs, 'level': level, 'tag': base, 'start': tag_start(tag)}
                         if items and items[-1]['kind'] == 'list' and items[-1].get('open') and \
                                 (items[-1]['tag'] == base or level > 0):
                             items[-1]['items'].append(entry)
@@ -1949,21 +1976,23 @@ def h_list(items):
     out = []
     stack = []  # open tags
 
-    def open_tag(tag):
-        out.append('<%s>' % tag)
+    def open_tag(tag, start=None):
+        out.append('<%s%s>' % (tag, ' start="%d"' % start if tag == 'ol' and start else ''))
         stack.append(tag)
+    # Storyline-lijsten kunnen op niveau 1 beginnen zonder bovenliggend punt: dan geen leeg buitenste bolletje.
+    base_level = min((int(it.get('level') or 0) for it in items), default=0)
 
     def close_to(level):
         while len(stack) > level:
             out.append('</li></%s>' % stack.pop())
     for it in items:
-        level = int(it.get('level') or 0) + 1
+        level = int(it.get('level') or 0) - base_level + 1
         tag = it.get('tag') or 'ul'
         if level > len(stack):
             while len(stack) < level:
                 if stack:
                     out[-1] = out[-1]  # li blijft open voor sublijst
-                open_tag(tag)
+                open_tag(tag, it.get('start'))
                 if len(stack) < level:
                     out.append('<li>')
             out.append('<li>' + h_runs(it['runs']))
@@ -2028,7 +2057,8 @@ def h_blockitems(blockitems, merge=True):
         if kind == 'li':
             base, level = split_tag(tag)
             if lst is None:
-                out.append('<%s>' % base)
+                st = tag_start(tag)
+                out.append('<%s%s>' % (base, ' start="%d"' % st if base == 'ol' and st else ''))
                 lst = base
             out.append('<li>' + h_runs(runs) + '</li>')
         else:
@@ -2065,7 +2095,9 @@ def h_item(it):
     if k == 'figrow':
         figs = ''.join('<figure><div class="ph"><img src="%s" alt="%s"></div><figcaption>%s</figcaption></figure>'
                        % (f['data'], esc(f.get('alt', '')), h_blockitems(f['items'], merge=False)) for f in it['figs'] if f.get('data'))
-        return '<div class="figrow n%d">%s</div>' % (min(len(it['figs']), 5), figs)
+        n = len(it['figs'])
+        cols = 2 if n == 4 else min(n, 5)  # vier foto's: 2x2 raster, groter en beter leesbaar
+        return '<div class="figrow n%d%s">%s</div>' % (cols, ' grid' if cols < n else '', figs)
     if k == 'labelrows':
         rows = ''.join('<div class="labelrow"><div class="lbl">%s</div><div class="val">%s</div></div>' % (esc(l), h_blockitems(v))
                        for l, v in it['rows'])
@@ -2160,6 +2192,9 @@ def render_html(chapters, title, version=''):
             '\n.figrow .ph img { max-height: 34mm; max-width: 100%; width: auto; margin: 0; }'
             '\n.figrow figcaption { font-size: 9.5pt; line-height: 1.35; color: #333; font-style: italic; text-align: center; margin-top: .5em; }'
             '\n.figrow figcaption p { margin: 0; }'
+            '\n.figrow.grid .ph { height: 55mm; } .figrow.grid .ph img { max-height: 55mm; }'
+            '\n.figrow figcaption ol, .figrow figcaption ul { margin: 0; padding-left: 0; list-style-position: inside; }'
+            '\n.figrow figcaption li { margin: 0; }'
             '\ntable.sltable { width: auto; min-width: 60%; border-collapse: collapse; margin: .6em 0 1.6em; font-size: 1em; break-inside: avoid; }'
             '\ntable.sltable td { border: none; border-bottom: 1px solid #e3e6e9; padding: .35em 1.4em .35em 0; vertical-align: top; }'
             '\ntable.sltable td:first-child { white-space: nowrap; font-weight: 700; color: #14324f; }'
