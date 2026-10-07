@@ -180,10 +180,12 @@ class Course:
         return ''
 
     @staticmethod
-    def decorative(ob, url):
+    def decorative(ob, url, ignore_size=False):
         w = ob.get('width') or 0
         h = ob.get('height') or 0
-        if w < 240 or h < 150:
+        if not ignore_size and (w < 240 or h < 150):
+            return True
+        if ignore_size and (w < 50 or h < 50):
             return True
         if w / max(h, 1) > 4.5 or h / max(w, 1) > 4.5:
             return True
@@ -298,7 +300,13 @@ class Course:
                     entries.append(dict(base, kind='input', w=ob.get('width') or 0, h=ob.get('height') or 0))
                     continue
                 url = self.image_url(ob)
-                if url and not self.decorative(ob, url) and ('img:' + url) not in seen and self.images.get(url):
+                if url and self.decorative(ob, url) and not self.decorative(ob, url, ignore_size=True) \
+                        and self.images.get(url) and ('img:' + url) not in seen:
+                    # Klein plaatje: alleen houden als er een onderschrift onder staat (thumbnailrij), zie structure_entries.
+                    seen.add('img:' + url)
+                    alt = ((ob.get('imagelib') or [{}])[0]).get('altText') or ''
+                    entries.append(dict(base, kind='smallimg', url=url, w=ob.get('width') or 0, h=ob.get('height') or 0, alt=norm(alt)))
+                elif url and not self.decorative(ob, url) and ('img:' + url) not in seen and self.images.get(url):
                     seen.add('img:' + url)
                     alt = ((ob.get('imagelib') or [{}])[0]).get('altText') or ''
                     entries.append(dict(base, kind='image', url=url, w=ob.get('width') or 0, h=ob.get('height') or 0, alt=norm(alt)))
@@ -395,6 +403,40 @@ def structure_entries(entries):
     texts = [e for e in entries if e['kind'] == 'text' and not e.get('is_choice')]
     used = set()
 
+    # --- rij plaatjes met onderschrift (bv. Batterij 1,5 Volt / Stopcontact 230 Volt / ...)
+    pics = [e for e in entries if e['kind'] in ('image', 'smallimg')]
+    figs = []
+    for im in pics:
+        best = None
+        for t in texts:
+            if id(t) in used or len(norm(t['text'])) > 120:
+                continue
+            gap = t['y'] - (im['y'] + (im.get('h') or 0))
+            if gap < -15 or gap > 90:
+                continue
+            ix0, ix1 = im['x'], im['x'] + (im.get('w') or 0)
+            tx0, tx1 = t['x'], t['x'] + (t.get('w') or 0)
+            if min(ix1, tx1) - max(ix0, tx0) < 0.3 * min(ix1 - ix0, tx1 - tx0, 1e9):
+                continue
+            if best is None or gap < best[0]:
+                best = (gap, t)
+        if best:
+            figs.append((im, best[1]))
+    bands = {}
+    for im, t in figs:
+        bands.setdefault((im['layer'], round(im['y'] / 120)), []).append((im, t))
+    for (layer, _), fs in bands.items():
+        if len(fs) < 2 or len({id(t) for _, t in fs}) != len(fs):
+            continue
+        fs.sort(key=lambda it: it[0]['x'])
+        i0 = fs[0][0]
+        entries.append({'kind': 'figrow', 'layer': layer, 'x': i0['x'], 'y': i0['y'], 'gx': i0['x'], 'gy': i0['y'], 'text': '', 'size': 0,
+                        'figs': [{'url': im['url'], 'alt': im.get('alt', ''), 'w': im['w'], 'h': im['h'], 'blocks': t['blocks']} for im, t in fs]})
+        for im, t in fs:
+            used.add(id(im))
+            used.add(id(t))
+    texts = [t for t in texts if id(t) not in used]
+
     # --- labelrijen
     pairs = []
     for lab in texts:
@@ -449,8 +491,8 @@ def structure_entries(entries):
     for layer, title, body in cards:
         rows.setdefault((layer, round(title['gy'] / 80)), []).append((title, body))
     for (layer, _), cs in rows.items():
-        # Eén losse kaart alleen als hij echt tekst heeft (bv. 'Doorlooptijd' naast een weggelaten navigatieknop).
-        if len(cs) < 2 and not (cs and cs[0][1]):
+        # Kaarten moeten tekst hebben: alleen-titels (onderwerpenlijst, aanklikbare tegels) zijn geen kaarten.
+        if not any(body for _, body in cs):
             continue
         cs.sort(key=lambda tb: tb[0]['gx'])
         t0 = cs[0][0]
@@ -461,7 +503,7 @@ def structure_entries(entries):
             used.add(id(t))
             for b in body:
                 used.add(id(b))
-    return [e for e in entries if id(e) not in used]
+    return [e for e in entries if id(e) not in used and e['kind'] != 'smallimg']
 
 
 # ----------------------------------------------------------------------------- documentmodel
@@ -890,6 +932,8 @@ def slide_model(course, sid, suppress_heading=False):
                 items[-1]['open'] = False
         elif e['kind'] == 'labelrows':
             items.append({'kind': 'labelrows', 'rows': [(lab, [it for b in blocks for it in block_to_items(b)]) for lab, blocks in e['rows']]})
+        elif e['kind'] == 'figrow':
+            items.append({'kind': 'figrow', 'figs': [dict(f, items=[it for b in f['blocks'] for it in block_to_items(b)]) for f in e['figs']]})
         elif e['kind'] == 'cards':
             items.append({'kind': 'cards', 'cards': [(t, [it for b in blocks for it in block_to_items(b)]) for t, blocks in e['cards']]})
         elif e['kind'] == 'image':
@@ -898,6 +942,13 @@ def slide_model(course, sid, suppress_heading=False):
             items.append({'kind': 'note', 'text': e['text']})
     if quizzes and not quiz_placed:
         items.extend(quizzes)
+    # Hoofdstuk-overzicht (titel + onderwerpen onder elkaar, zoals op de verdeeldia): één overzichtskader.
+    body_texts = [e for e in entries if e['kind'] == 'text' and e is not heading and not e.get('is_choice')]
+    others = [e for e in entries if e['kind'] not in ('text',)]
+    if not quizzes and not others and len(body_texts) >= 3 and all(_is_label(e) for e in body_texts) \
+            and max(e['x'] for e in body_texts) - min(e['x'] for e in body_texts) <= 40:
+        topics = [norm(e['text']) for e in sorted(body_texts, key=lambda e: e['y'])]
+        items = [x for x in items if x['kind'] == 'h2'] + [{'kind': 'overview', 'topics': topics}]
     # Verdeeldia's: alleen korte opschriften onder elkaar (Transport / Distributie / Gebruik) -> lijst.
     out = []
     i = 0
@@ -931,7 +982,7 @@ def slide_model(course, sid, suppress_heading=False):
             rest = [x for x in items if x['kind'] not in ('h2', 'caption', 'image')]
             if rest and all(x['kind'] in ('p', 'list', 'h3') for x in rest):
                 items = head + [{'kind': 'aside', 'items': rest, 'image': img, 'captions': [c['text'] for c in caps]}]
-    signature = norm(' '.join(item_text(x) for x in items if x['kind'] in ('h2', 'h3', 'p', 'list', 'labelrows', 'cards', 'aside')))
+    signature = norm(' '.join(item_text(x) for x in items if x['kind'] in ('h2', 'h3', 'p', 'list', 'labelrows', 'cards', 'aside', 'figrow', 'overview')))
     return items, (norm(heading['text']) if heading is not None else ''), signature
 
 
@@ -952,6 +1003,10 @@ def item_text(x):
         return ' '.join(t + ' ' + bi(v) for t, v in x['cards'])
     if k == 'aside':
         return ' '.join(item_text(i) for i in x['items']) + ' ' + ' '.join(x.get('captions') or [])
+    if k == 'figrow':
+        return ' '.join(bi(f['items']) for f in x['figs'])
+    if k == 'overview':
+        return ' '.join(x['topics'])
     return ''
 
 
@@ -1018,9 +1073,11 @@ def build_document(course):
             chapters[-1]['slides'] += len(ch['ids'])
             continue
         n += 1
+        m = re.match(r'^\s*(?:H|hoofdstuk)\s*(\d+)\b', ch['label'], re.I)
+        num = int(m.group(1)) if m else None  # nummer zoals in het spelermenu; Inleiding/Samenvatting/Casus zonder nummer
         if not title:
-            title = 'Hoofdstuk %d' % n
-        chapters.append({'n': n, 'title': title, 'items': body, 'slides': len(ch['ids'])})
+            title = 'Hoofdstuk %d' % num if num else 'Hoofdstuk'
+        chapters.append({'n': n, 'num': num, 'title': title, 'items': body, 'slides': len(ch['ids'])})
     return chapters
 
 
@@ -1291,7 +1348,7 @@ def render(chapters, title, out_path):
         story.append(PageBreak())
         h = ChapterHeading(esc(ch['title']), S['h1'])
         h.toc_text = ch['title']
-        story.append(KeepTogether([Paragraph('Hoofdstuk %d' % ch['n'], S['kicker']), h, Rule(W), Spacer(1, 4)]))
+        story.append(KeepTogether(([Paragraph('Hoofdstuk %d' % ch['num'], S['kicker'])] if ch.get('num') else []) + [h, Rule(W), Spacer(1, 4)]))
         items = ch['items']
         i = 0
         while i < len(items):
@@ -1317,6 +1374,16 @@ def render(chapters, title, out_path):
 
 def flowable_for(it, S, W):
     k = it['kind']
+    if k == 'overview':
+        return Paragraph('<b>In dit hoofdstuk:</b> ' + ', '.join(esc(t) for t in it['topics']), S['body'])
+    if k == 'figrow':
+        fl = []
+        for f in it['figs']:
+            img = flowable_for({'kind': 'image', 'data': f.get('data'), 'w': f['w'], 'h': f['h']}, S, W)
+            if img is not None:
+                fl.append(img)
+            fl.append(Paragraph(' '.join(runs_to_markup(r) for _, r, _ in f['items']), S['caption']))
+        return KeepTogether(fl) if fl else None
     if k in ('labelrows', 'cards', 'aside'):
         fl = []
         if k == 'labelrows':
@@ -1491,6 +1558,12 @@ def h_blockitems(blockitems):
 
 def h_item(it):
     k = it['kind']
+    if k == 'overview':
+        return '<div class="overview"><div class="ov-head">In dit hoofdstuk</div><ul>%s</ul></div>' % ''.join('<li>%s</li>' % esc(t) for t in it['topics'])
+    if k == 'figrow':
+        figs = ''.join('<figure><div class="ph"><img src="%s" alt="%s"></div><figcaption>%s</figcaption></figure>'
+                       % (f['data'], esc(f.get('alt', '')), h_blockitems(f['items'])) for f in it['figs'] if f.get('data'))
+        return '<div class="figrow n%d">%s</div>' % (min(len(it['figs']), 5), figs)
     if k == 'labelrows':
         rows = ''.join('<div class="labelrow"><div class="lbl">%s</div><div class="val">%s</div></div>' % (esc(l), h_blockitems(v))
                        for l, v in it['rows'])
@@ -1535,14 +1608,15 @@ def h_item(it):
 
 def render_html(chapters, title):
     _OPT_SEQ[0] = 0
-    toc = ''.join('<li>%s</li>' % esc(ch['title']) for ch in chapters)
+    toc = ''.join('<li><span class="tn">%s</span>%s</li>' % (('%d.' % ch['num']) if ch.get('num') else '', esc(ch['title'])) for ch in chapters)
     cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>'
-             '<div class="toc"><h2>Inhoud</h2><ol>%s</ol></div></section>') % (esc(title), toc)
+             '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div></section>') % (esc(title), toc)
     secs = []
     for ch in chapters:
         body = ''.join(h_item(it) for it in ch['items'])
-        secs.append('<section class="chapter"><div class="chapter-header"><p class="kicker">Hoofdstuk %d</p><h1>%s</h1></div>%s</section>'
-                    % (ch['n'], esc(ch['title']), body))
+        kicker = '<p class="kicker">Hoofdstuk %d</p>' % ch['num'] if ch.get('num') else ''
+        secs.append('<section class="chapter"><div class="chapter-header">%s<h1>%s</h1></div>%s</section>'
+                    % (kicker, esc(ch['title']), body))
     css = rise_css().replace('__CPE_TITLE__', title.replace('\\', '\\\\').replace('"', '\\"'))
     css += ('\n.labelrows { margin: .6em 0 1.6em; }'
             '\n.labelrow { display: flex; gap: 1.2em; align-items: center; margin: 0 0 .9em; break-inside: avoid; }'
@@ -1555,7 +1629,21 @@ def render_html(chapters, title):
             '\n.slcard { border: 1px solid #d9d9d9; border-radius: 6px; padding: .9em 1.1em; break-inside: avoid; }'
             '\n.slcard .slcard-title { font-weight: 700; margin-bottom: .4em; }'
             '\n.slcard p:last-child { margin-bottom: 0; }'
-            '\n.image-aside figcaption { text-align: left; }')
+            '\n.image-aside figcaption { text-align: left; }'
+            '\n.cover .toc ul.toc-list { list-style: none; margin: 0; padding: 0; font-size: 12pt; line-height: 1.7; }'
+            '\n.cover .toc .tn { display: inline-block; min-width: 1.8em; color: #bc1413; }'
+            '\n.overview { border: 1px solid #cfd6dc; border-radius: 8px; overflow: hidden; max-width: 75%; margin: .4em 0 1.8em; break-inside: avoid; }'
+            '\n.overview .ov-head { background: #14324f; color: #fff; font-weight: 700; padding: .55em 1.1em; }'
+            '\n.overview ul { list-style: none; margin: 0; padding: .6em 1.1em .7em; }'
+            '\n.overview li { margin: .3em 0; }'
+            '\n.figrow { display: grid; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; align-items: start; }'
+            '\n.figrow.n2 { grid-template-columns: repeat(2, 1fr); } .figrow.n3 { grid-template-columns: repeat(3, 1fr); }'
+            '\n.figrow.n4 { grid-template-columns: repeat(4, 1fr); } .figrow.n5 { grid-template-columns: repeat(5, 1fr); }'
+            '\n.figrow figure { margin: 0; }'
+            '\n.figrow .ph { height: 34mm; display: flex; align-items: flex-end; justify-content: center; }'
+            '\n.figrow .ph img { max-height: 34mm; max-width: 100%; width: auto; margin: 0; }'
+            '\n.figrow figcaption { font-size: 9.5pt; line-height: 1.35; color: #333; font-style: italic; text-align: center; margin-top: .5em; }'
+            '\n.figrow figcaption p { margin: 0; }')
     css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
     return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
             '<body class="forms sl">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
@@ -1605,6 +1693,9 @@ def main():
                     im['data'] = course.images.get(im['url'], '')
             if it['kind'] == 'aside':
                 it['image']['data'] = course.images.get(it['image']['url'], '')
+            if it['kind'] == 'figrow':
+                for f in it['figs']:
+                    f['data'] = course.images.get(f['url'], '')
     if a.model:
         with open(a.model, 'w', encoding='utf-8') as f:
             json.dump([{**ch, 'items': [{k: v for k, v in i.items() if k not in ('data', 'images')} for i in ch['items']]} for ch in chapters],
