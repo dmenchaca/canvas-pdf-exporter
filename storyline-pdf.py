@@ -231,13 +231,26 @@ class Course:
                 imgs = [u for u in (self.image_url(it['ob']) for it in items) if u]
                 if not L.get('isBaseLayer') and (texts or imgs):
                     layer_count['|'.join(texts + imgs)] += 1
-                for t in texts:
+        self.layer_count = layer_count
+        self.slide_count = max(n, 1)
+        # Tweede ronde: hoe vaak komt een tekst voor buiten de vaste spelerlagen (menu, voortgang)?
+        # Anders lijkt bv. de diakop 'Samenvatting' chrome omdat het woord in het menu op elke dia staat.
+        for sid in self.order:
+            sl = self.slides.get(sid)
+            if not sl:
+                continue
+            seen = set()
+            for L in sl.get('slideLayers') or []:
+                if self.is_chrome_layer(L):
+                    continue
+                for bl in (self.text_blocks(it['ob']) for it in self.flatten(L)):
+                    if not bl:
+                        continue
+                    t = norm(' '.join(b['text'] for b in bl))
                     if t not in seen:
                         seen.add(t)
                         text_count[t] += 1
-        self.layer_count = layer_count
         self.text_count = text_count
-        self.slide_count = max(n, 1)
 
     def layer_signature(self, L):
         items = self.flatten(L)
@@ -355,6 +368,24 @@ class Course:
                                     is_choice=full in choice_texts or full.lower() in choice_texts, acc=ob.get('accType'),
                                     all_bold=all(s['bold'] for b in blocks for s in b['spans'] if norm(s['text'])),
                                     w=ob.get('width') or 0, h=ob.get('height') or 0))
+        if any((it.get('type') == 'matching' or it.get('statements')) for it in interactions):
+            # Sleepitems liggen op één stapel (zelfde positie en maat): het zijn antwoordstukjes, geen dia-tekst.
+            spots = Counter((round(e['x']), round(e['y']), e.get('w'), e.get('h')) for e in entries if e['kind'] == 'text')
+            for e in entries:
+                if e['kind'] == 'text' and spots[(round(e['x']), round(e['y']), e.get('w'), e.get('h'))] >= 2:
+                    e['is_choice'] = True
+            # De feedbacklaag toont vaak de opgeloste afbeelding ('Bekijk de goede antwoorden rechts in beeld').
+            for li, L in enumerate(sl.get('slideLayers') or []):
+                if L.get('id') not in wrong_layers:
+                    continue
+                texts, _ = self.layer_signature(L)
+                if not re.search(r'(goede|juiste|correcte) antwoord', ' '.join(texts), re.I):
+                    continue
+                for it in self.flatten(L):
+                    u = self.image_url(it['ob'])
+                    if u and not self.decorative(it['ob'], u) and self.images.get(u):
+                        entries.append({'kind': 'solution', 'layer': 0, 'x': it['x'], 'y': it['y'], 'gx': it['x'], 'gy': it['y'],
+                                        'url': u, 'w': it['ob'].get('width') or 0, 'h': it['ob'].get('height') or 0, 'text': '', 'size': 0})
         entries = structure_entries(entries)
         entries.sort(key=lambda e: (e['layer'], round(e['gy'] / 80), e['gx'], e['y'], e['x']))
         return entries, interactions, layer_ids
@@ -911,6 +942,19 @@ def build_quiz(course, entries, interactions, layer_ids, heading):
                     q['question'] += [item for b in e['blocks'] for item in block_to_items(b)]
         elif kind == 'matching' or it.get('statements'):
             q['pairs'] = matching_pairs(it)
+            # Objectnamen van de auteur leesbaar maken: 'Doel hoogspanningslijn' -> 'hoogspanningslijn';
+            # 'A HS lijn - 380.000 V' -> '380.000 V' als dat stukje letterlijk als sleepitem op de dia staat.
+            pieces = {norm(e['text']) for e in entries if e['kind'] == 'text' and e.get('is_choice')}
+            def _nice_choice(c):
+                if ' - ' in c:
+                    tail = c.rsplit(' - ', 1)[1].strip()
+                    if tail in pieces:
+                        return tail
+                return c
+            q['pairs'] = [(re.sub(r'^(doel|drop|target|vak)\s+', '', a, flags=re.I), _nice_choice(b)) for a, b in q['pairs']]
+            sol = [e for e in entries if e['kind'] == 'solution']
+            if sol:
+                q['solution'] = {'url': sol[0]['url'], 'w': sol[0]['w'], 'h': sol[0]['h']}
             if q['pairs'] and all(DOTS_RE.match(a) or not a for a, b in q['pairs']):
                 # Invuloefening met sleepwoorden: de 'begrippen' zijn lege invulvakken.
                 q['answers'] = [b for a, b in q['pairs']]
@@ -1038,9 +1082,13 @@ def slide_model(course, sid, suppress_heading=False):
     if heading is not None and not suppress_heading:
         items.append({'kind': 'h2', 'text': norm(heading['text'])})
     quiz_placed = False
+    has_solution = any(q.get('solution') for q in quizzes)
+    biggest = max([e for e in entries if e['kind'] == 'image' and e['layer'] == 0], key=lambda e: (e.get('w') or 0) * (e.get('h') or 0), default=None)
     for e in entries:
-        if e is heading or e in used or e in popup_ids or e.get('is_choice') or e['kind'] == 'input':
+        if e is heading or e in used or e in popup_ids or e.get('is_choice') or e['kind'] in ('input', 'solution'):
             continue
+        if has_solution and e is biggest:
+            continue  # onopgeloste versie van de sleepoefening; de opgeloste staat in het vraagkader
         if e.get('popup_title'):
             continue
         if e['layer'] in consumed_layers:
@@ -1738,6 +1786,8 @@ def h_quiz(q):
         body.append('<p class="hint">Aanwijsvraag: klik in de e-module de juiste plek(ken) op de afbeelding aan. De juiste plaatsing staat in de toelichting.</p>')
     if q.get('open'):
         body.append('<p class="hint">Open vraag: schrijf je antwoord op en vergelijk het met het voorbeeld hieronder.</p>')
+    if q.get('solution', {}).get('data'):
+        body.append('<figure class="solution"><img src="%s" alt=""><figcaption>Juiste oplossing</figcaption></figure>' % q['solution']['data'])
     if q['pairs']:
         rows = ''.join('<tr><td>%s</td><td>%s <span class="ok">✓</span></td></tr>' % (esc(a), esc(b)) for a, b in q['pairs'])
         body.append('<table class="matching"><tr><th>Begrip</th><th>Hoort bij</th></tr>' + rows + '</table>')
@@ -1907,6 +1957,9 @@ def render_html(chapters, title, version=''):
             '\n.popup .pu-body { padding: .7em 1em .8em; }'
             '\n.popup .pu-body p:last-child { margin-bottom: 0; }'
             '\n.keep-pair { break-inside: avoid; }'
+            '\n.quiz figure.solution { margin: .6em 0 .9em; }'
+            '\n.quiz figure.solution img { max-height: 80mm; margin: 0 auto; }'
+            '\n.quiz figure.solution figcaption { color: #1d6b2f; font-weight: 700; }'
             '\n.sl .quiz .answer p + p { display: block; margin: .5em 0 0; }'
             '\n.popup.untitled { border: none; border-left: 3px solid #14324f; background: #f4f6f8; }'
             '\n.popup.untitled .pu-body { padding: .55em 1em .6em; }')
@@ -1962,6 +2015,8 @@ def main():
             if it['kind'] == 'figrow':
                 for f in it['figs']:
                     f['data'] = course.images.get(f['url'], '')
+            if it['kind'] == 'quiz' and it.get('solution'):
+                it['solution']['data'] = course.images.get(it['solution']['url'], '')
     if a.model:
         with open(a.model, 'w', encoding='utf-8') as f:
             json.dump([{**ch, 'items': [{k: v for k, v in i.items() if k not in ('data', 'images')} for i in ch['items']]} for ch in chapters],
