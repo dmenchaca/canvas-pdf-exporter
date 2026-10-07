@@ -648,6 +648,8 @@ def runs_to_markup(runs):
             parts.append(t)
     s = ''.join(parts)
     s = re.sub(r'[ \t]+', ' ', s)
+    # \u2028 = regeleinde binnen een alinea (vervolgregel zonder witruimte ertussen, zoals op de dia)
+    s = re.sub(r'\s*\u2028\s*', '<br/>', s.strip())
     return s.strip()
 
 
@@ -783,6 +785,32 @@ def matching_pairs(it):
     return pairs
 
 
+CHECK_LEAD_RE = re.compile(r'^\s*controleer of (je )?(jouw )?antwoord lijkt op (het )?onderstaande\.?\s*', re.I)
+
+
+def strip_check_lead(items):
+    """'Controleer of antwoord lijkt op het onderstaande.' is een spelerinstructie vóór de uitleg: alleen die zin weghalen."""
+    out = []
+    for i, (kind, runs, tag) in enumerate(items):
+        if not out and runs:
+            txt = ''.join(t for t, _ in runs)
+            m = CHECK_LEAD_RE.match(txt)
+            if m:
+                cut = m.end()
+                new, pos = [], 0
+                for t, b in runs:
+                    if pos + len(t) <= cut:
+                        pos += len(t)
+                        continue
+                    new.append((t[max(0, cut - pos):], b))
+                    pos += len(t)
+                if not norm(''.join(t for t, _ in new)):
+                    continue
+                runs = new
+        out.append((kind, runs, tag))
+    return out
+
+
 def merge_broken_tuples(seq):
     out = []
     for kind, runs, tag in seq:
@@ -799,7 +827,7 @@ def merge_broken_tuples(seq):
 def build_quiz(course, entries, interactions, layer_ids, heading):
     """Vraagblok(ken) voor een dia met interacties, plus de lagen die al verwerkt zijn."""
     texts = [e for e in entries if e['kind'] == 'text' and not e['is_choice'] and e is not heading]
-    base_texts = [e for e in texts if e['layer'] == 0]
+    base_texts = [e for e in texts if e['layer'] == 0 and not (CREDIT_RE.match(norm(e['text'])) and len(norm(e['text'])) < 80)]
     right_layers, wrong_layers = set(), set()
     for it in interactions:
         r, w = feedback_layers(it)
@@ -839,7 +867,7 @@ def build_quiz(course, entries, interactions, layer_ids, heading):
         if FEEDBACK_ONLY_RE.match(norm(txt)):
             continue
         cleaned.append((kind, runs, tag))
-    fb_items = cleaned
+    fb_items = strip_check_lead(cleaned)
 
     used = IdSet()
     quizzes = []
@@ -918,6 +946,8 @@ def build_reflection(entries, heading):
     consumed = set()
     for e in texts:
         t = norm(e['text'])
+        if e['layer'] == 0 and CREDIT_RE.match(t) and len(t) < 80:
+            continue  # fotobron hoort bij de foto, niet bij de vraag
         if e['layer'] == 0:
             if re.match(r'^(vul hier je antwoord in|typ hier|schrijf hier)', t, re.I):
                 used.add(e)
@@ -930,11 +960,12 @@ def build_reflection(entries, heading):
             if NAV_WORD_RE.match(t):
                 continue
             for b in e['blocks']:
-                if re.match(r'^(controleer of je antwoord|vergelijk je antwoord|feedback$)', norm(b['text']), re.I):
-                    continue
+                if re.match(r'^feedback$', norm(b['text']), re.I):
+                    continue  # kopje van de feedbacklaag; 'Controleer of …' wordt door strip_check_lead per zin verwijderd
                 q['feedback'] += block_to_items(b)
     if not q['question']:
         return [], used, set()
+    q['feedback'] = strip_check_lead(q['feedback'])
     return [q], used, consumed
 
 
@@ -1042,6 +1073,12 @@ def slide_model(course, sid, suppress_heading=False):
                     else:
                         if items and items[-1]['kind'] == 'list':
                             items[-1]['open'] = False
+                        if re.match(r'^(\t| {2,})\S', b['text']) and not re.match(r'^\s*(\d+[.)]|[a-z][.)]\s|[•▪◦‣\-–])', b['text']) \
+                                and items and items[-1]['kind'] == 'p' \
+                                and items[-1].get('src') == e.get('id'):
+                            # ingesprongen vervolgregel ('    Alle kunststof ...') hoort bij de alinea erboven
+                            items[-1]['runs'] = items[-1]['runs'] + [('\u2028', False)] + runs
+                            continue
                         items.append({'kind': 'p', 'runs': runs, 'src': e.get('id')})
             if items and items[-1]['kind'] == 'list':
                 items[-1]['open'] = False
@@ -1096,8 +1133,14 @@ def slide_model(course, sid, suppress_heading=False):
     imgs = [x for x in items if x['kind'] == 'image']
     if len(imgs) >= 2:
         first = items.index(imgs[0])
+        body_entries = [e for e in entries if e['kind'] == 'text' and e is not heading and e['layer'] == 0
+                        and not CREDIT_RE.match(norm(e['text']))]
+        right_edge = max([e['x'] + (e.get('w') or 0) for e in body_entries] or [0])
         items = [x for x in items if x['kind'] != 'image']
-        items.insert(first, {'kind': 'gallery', 'images': imgs})
+        if body_entries and all(im.get('x', 0) >= right_edge - 40 for im in imgs):
+            # foto's staan rechts naast de tekst: na de tekst zetten, niet tussen stap 1 en 2
+            first = max([i for i, x in enumerate(items) if x['kind'] in ('p', 'list', 'h3')] or [first - 1]) + 1
+        items.insert(min(first, len(items)), {'kind': 'gallery', 'images': imgs})
     elif len(imgs) == 1 and not quizzes:
         # Tekst links, foto rechts (zoals op de dia): naast elkaar zetten in plaats van onder elkaar.
         img = imgs[0]
@@ -1140,6 +1183,41 @@ def item_text(x):
     if k == 'popup':
         return x['title'] + ' ' + bi(x['items'])
     return ''
+
+
+def dedupe_within_chapter(body):
+    kk = lambda t: re.sub(r'[^a-z0-9]+', '', t.lower())
+    seen = set()
+    out = []
+    for x in body:
+        k = x['kind']
+        if k == 'p':
+            key = kk(item_text(x))
+            if len(key) >= 40 and key in seen:
+                continue
+            seen.add(key)
+        elif k == 'list':
+            keep = []
+            for li in x['items']:
+                key = kk(''.join(t for t, _ in li['runs']))
+                if len(key) >= 40 and key in seen:
+                    continue
+                seen.add(key)
+                keep.append(li)
+            if not keep:
+                continue
+            x = dict(x, items=keep)
+        elif k in ('popup', 'aside', 'cards', 'labelrows', 'table', 'figrow'):
+            key = kk(item_text(x))
+            if len(key) >= 40 and key in seen:
+                continue
+            seen.add(key)
+            if k == 'aside':
+                # alinea's in het zij-aan-zij-blok ook meetellen
+                for i in x['items']:
+                    seen.add(kk(item_text(i)))
+        out.append(x)
+    return out
 
 
 def build_document(course):
@@ -1196,12 +1274,23 @@ def build_document(course):
             title = first_meta_title or first_heading or ''
         if title == title.upper() and len(title) > 3:
             title = title[0] + title[1:].lower()
+        # Pop-up waarvan de tekst elders in het hoofdstuk al volledig staat (bv. 'Voorbeeld'-pop-up = volgende dia): weglaten.
+        kk = lambda t: re.sub(r'[^a-z0-9]+', '', t.lower())
+        def _rest(i):
+            # alleen gewone dia-tekst telt; een tweede exemplaar van dezelfde pop-up regelt dedupe_within_chapter
+            return kk(' '.join(item_text(x) for j, x in enumerate(body) if j != i and x['kind'] != 'popup'))
+        body = [x for i, x in enumerate(body)
+                if not (x['kind'] == 'popup' and len(kk(item_text(x))) > 80
+                        and kk(' '.join(''.join(t for t, _ in r) for _, r, _ in x['items'])) in _rest(i))]
+        # Letterlijke herhaling binnen hetzelfde hoofdstuk (begrippenlijst-dia's, opbouwdia's, pop-up = dia-tekst):
+        # alleen de eerste keer tonen. Een samenvatting in een eigen hoofdstuk blijft dus staan.
+        body = dedupe_within_chapter(body)
         # Een h2 die gelijk is aan de hoofdstuktitel direct aan het begin is dubbel.
         if body and body[0]['kind'] == 'h2' and body[0]['text'].lower() == title.lower():
             body = body[1:]
         # Opeenvolgende menu-items met dezelfde naam (Begrippenlijst 1..7, Casus 1..4) worden één hoofdstuk.
         if chapters and title and chapters[-1]['title'].lower() == title.lower():
-            chapters[-1]['items'].extend(body)
+            chapters[-1]['items'] = dedupe_within_chapter(chapters[-1]['items'] + body)
             chapters[-1]['slides'] += len(ch['ids'])
             continue
         n += 1
@@ -1765,18 +1854,19 @@ def render_html(chapters, title, version=''):
              '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div></section>') % (esc(title), ver, toc)
     secs = []
     for ch in chapters:
-        parts, its = [], ch['items']
+        parts, its, done = [], ch['items'], set()
         for i, it in enumerate(its):
+            if i in done:
+                continue  # pop-up al samen met het begrip gezet
             nxt = its[i + 1] if i + 1 < len(its) else None
-            if it['kind'] == 'popup' and parts and parts[-1][0]:
-                continue  # al samen met het begrip gezet
             if nxt is not None and nxt['kind'] == 'popup' and nxt['title'] and it['kind'] in ('p', 'list', 'h3') \
                     and nxt['title'].lower() in item_text(it).lower():
                 # begrip + uitleg bij elkaar houden (niet over een paginagrens splitsen)
-                parts.append((True, '<div class="keep-pair">%s%s</div>' % (h_item(it), h_item(nxt))))
+                parts.append('<div class="keep-pair">%s%s</div>' % (h_item(it), h_item(nxt)))
+                done.add(i + 1)
             else:
-                parts.append((False, h_item(it)))
-        body = ''.join(h for _, h in parts)
+                parts.append(h_item(it))
+        body = ''.join(parts)
         kicker = '<p class="kicker">Hoofdstuk %d</p>' % ch['num'] if ch.get('num') else ''
         secs.append('<section class="chapter"><div class="chapter-header">%s<h1>%s</h1></div>%s</section>'
                     % (kicker, esc(ch['title']), body))
@@ -1817,6 +1907,7 @@ def render_html(chapters, title, version=''):
             '\n.popup .pu-body { padding: .7em 1em .8em; }'
             '\n.popup .pu-body p:last-child { margin-bottom: 0; }'
             '\n.keep-pair { break-inside: avoid; }'
+            '\n.sl .quiz .answer p + p { display: block; margin: .5em 0 0; }'
             '\n.popup.untitled { border: none; border-left: 3px solid #14324f; background: #f4f6f8; }'
             '\n.popup.untitled .pu-body { padding: .55em 1em .6em; }')
     css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
