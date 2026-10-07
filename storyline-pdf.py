@@ -111,8 +111,8 @@ class Course:
         for ob in container.get('objects') or []:
             x = ox + (ob.get('xPos') or 0)
             y = oy + (ob.get('yPos') or 0)
-            t = top or (x, y)
-            acc.append({'ob': ob, 'x': x, 'y': y, 'gx': t[0], 'gy': t[1]})
+            t = top or (x, y, ob.get('id') if ob.get('objects') else None, ob.get('accType') if ob.get('objects') else None)
+            acc.append({'ob': ob, 'x': x, 'y': y, 'gx': t[0], 'gy': t[1], 'gid': t[2], 'gacc': t[3]})
             if ob.get('objects'):
                 self.flatten(ob, x, y, acc, t)
         return acc
@@ -172,7 +172,10 @@ class Course:
             return True
         if re.search(r'_[0-9A-F]{6}_[0-9A-F]{6}\.', url, re.I):
             return True
-        if re.search(r'zoomIcon|/Shape[0-9A-Za-z]+\.png$', url, re.I):
+        if re.search(r'zoomIcon', url, re.I):
+            return True
+        # Knoppen/vormen met een vulling heten ook 'ShapeXXXX.png', maar foto's (kind 'image') ook: die houden.
+        if ob.get('kind') != 'image' and re.search(r'/Shape[0-9A-Za-z]+\.png$', url, re.I):
             return True
         alt = ((ob.get('imagelib') or [{}])[0]).get('altText') or ''
         if re.search(r'transparent|arrow|pijl|icon|button|knop|driehoek|triangle|achtergrond|background', alt, re.I):
@@ -265,7 +268,8 @@ class Course:
                 continue
             for it in self.flatten(L):
                 ob = it['ob']
-                base = {'x': it['x'], 'y': it['y'], 'gx': it['gx'], 'gy': it['gy'], 'layer': li, 'id': ob.get('id')}
+                base = {'x': it['x'], 'y': it['y'], 'gx': it['gx'], 'gy': it['gy'], 'layer': li, 'id': ob.get('id'),
+                        'gid': it.get('gid'), 'gacc': it.get('gacc')}
                 kind = ob.get('kind')
                 if kind == 'video':
                     entries.append(dict(base, kind='note', text='Video: ' + (ob.get('altText') or 'video in de e-module')))
@@ -289,6 +293,8 @@ class Course:
                 full = norm(' '.join(b['text'] for b in blocks))
                 if self.is_chrome_text(full):
                     continue
+                if it.get('gacc') == 'button' and re.search(r'navigat', full, re.I):
+                    continue  # kaart-knop die de uitleg over de spelerknoppen opent
                 if ('t:' + full) in seen:
                     continue
                 seen.add('t:' + full)
@@ -296,6 +302,7 @@ class Course:
                                     is_choice=full in choice_texts or full.lower() in choice_texts, acc=ob.get('accType'),
                                     all_bold=all(s['bold'] for b in blocks for s in b['spans'] if norm(s['text'])),
                                     w=ob.get('width') or 0, h=ob.get('height') or 0))
+        entries = structure_entries(entries)
         entries.sort(key=lambda e: (e['layer'], round(e['gy'] / 80), e['gx'], e['y'], e['x']))
         return entries, interactions, layer_ids
 
@@ -349,6 +356,90 @@ class Course:
         if sid in ('ResumePromptSlide', 'ExternalInterfaceErrorSlide'):
             return True
         return False
+
+
+# ----------------------------------------------------------------------------- structuur op de dia
+
+def _is_label(e):
+    return (e['kind'] == 'text' and not e.get('is_choice') and len(e['blocks']) == 1 and
+            len(norm(e['text'])) <= 40 and not re.search(r'[.;:]$', norm(e['text'])))
+
+
+def structure_entries(entries):
+    """Herkent vaste dia-patronen voordat de leesvolgorde wordt bepaald:
+    - labelrijen: kort opschrift (pijl/balk) met de bijbehorende zin rechts ernaast op dezelfde hoogte;
+    - kaarten: groepen met een korte titel en tekst eronder, met minstens twee naast elkaar.
+    Alleen herschikken: alle tekst blijft letterlijk behouden."""
+    texts = [e for e in entries if e['kind'] == 'text' and not e.get('is_choice')]
+    used = set()
+
+    # --- labelrijen
+    pairs = []
+    for lab in texts:
+        if not _is_label(lab) or (lab.get('w') or 0) > 520:
+            continue
+        best = None
+        for p in texts:
+            if p is lab or p['layer'] != lab['layer'] or _is_label(p):
+                continue
+            if p['x'] < lab['x'] + (lab.get('w') or 0) - 30:
+                continue
+            ov = min(lab['y'] + (lab.get('h') or 0), p['y'] + (p.get('h') or 0)) - max(lab['y'], p['y'])
+            if ov <= 0.3 * min(lab.get('h') or 1, p.get('h') or 1):
+                continue
+            if best is None or p['x'] < best['x']:
+                best = p
+        if best is not None:
+            pairs.append((lab, best))
+    partners = [id(b) for _, b in pairs]
+    if len(pairs) >= 2 and len(set(partners)) == len(partners):
+        by_layer = {}
+        for lab, val in pairs:
+            by_layer.setdefault(lab['layer'], []).append((lab, val))
+        for layer, ps in by_layer.items():
+            if len(ps) < 2:
+                continue
+            ps.sort(key=lambda lv: lv[0]['y'])
+            first = ps[0][0]
+            entries.append({'kind': 'labelrows', 'layer': layer, 'x': first['x'], 'y': first['y'], 'gx': first['gx'],
+                            'gy': first['gy'], 'rows': [(norm(l['text']), v['blocks']) for l, v in ps], 'text': '', 'size': 0})
+            for l, v in ps:
+                used.add(id(l))
+                used.add(id(v))
+
+    # --- kaarten
+    groups = {}
+    for e in texts:
+        if id(e) in used or not e.get('gid'):
+            continue
+        groups.setdefault((e['layer'], e['gid']), []).append(e)
+    cards = []
+    for (layer, gid), members in groups.items():
+        members.sort(key=lambda e: e['y'])
+        title = members[0]
+        if not _is_label(title):
+            continue
+        body = [m for m in members[1:] if m['y'] >= title['y'] + 0.5 * (title.get('h') or 0)]
+        if len(body) != len(members) - 1:
+            continue
+        cards.append((layer, title, body))
+    rows = {}
+    for layer, title, body in cards:
+        rows.setdefault((layer, round(title['gy'] / 80)), []).append((title, body))
+    for (layer, _), cs in rows.items():
+        # Eén losse kaart alleen als hij echt tekst heeft (bv. 'Doorlooptijd' naast een weggelaten navigatieknop).
+        if len(cs) < 2 and not (cs and cs[0][1]):
+            continue
+        cs.sort(key=lambda tb: tb[0]['gx'])
+        t0 = cs[0][0]
+        entries.append({'kind': 'cards', 'layer': layer, 'x': t0['gx'], 'y': t0['gy'], 'gx': t0['gx'], 'gy': t0['gy'],
+                        'cards': [(norm(t['text']), [blk for b in body for blk in b['blocks']]) for t, body in cs],
+                        'text': '', 'size': 0})
+        for t, body in cs:
+            used.add(id(t))
+            for b in body:
+                used.add(id(b))
+    return [e for e in entries if id(e) not in used]
 
 
 # ----------------------------------------------------------------------------- documentmodel
@@ -775,8 +866,12 @@ def slide_model(course, sid, suppress_heading=False):
                         items.append({'kind': 'p', 'runs': runs})
             if items and items[-1]['kind'] == 'list':
                 items[-1]['open'] = False
+        elif e['kind'] == 'labelrows':
+            items.append({'kind': 'labelrows', 'rows': [(lab, [it for b in blocks for it in block_to_items(b)]) for lab, blocks in e['rows']]})
+        elif e['kind'] == 'cards':
+            items.append({'kind': 'cards', 'cards': [(t, [it for b in blocks for it in block_to_items(b)]) for t, blocks in e['cards']]})
         elif e['kind'] == 'image':
-            items.append({'kind': 'image', 'url': e['url'], 'w': e['w'], 'h': e['h'], 'alt': e['alt']})
+            items.append({'kind': 'image', 'url': e['url'], 'w': e['w'], 'h': e['h'], 'alt': e['alt'], 'x': e['x'], 'y': e['y']})
         elif e['kind'] == 'note':
             items.append({'kind': 'note', 'text': e['text']})
     if quizzes and not quiz_placed:
@@ -799,14 +894,43 @@ def slide_model(course, sid, suppress_heading=False):
     # Fotogalerijen: meerdere afbeeldingen op één dia naast elkaar, maximaal vier.
     imgs = [x for x in items if x['kind'] == 'image']
     if len(imgs) >= 2:
-        keep = imgs[:4]
         first = items.index(imgs[0])
         items = [x for x in items if x['kind'] != 'image']
-        items.insert(first, {'kind': 'gallery', 'images': keep})
-    signature = norm(' '.join(x.get('text', '') or ''.join(r[0] for r in x.get('runs', [])) or
-                              ' '.join(''.join(r[0] for r in li['runs']) for li in x.get('items', []))
-                              for x in items if x['kind'] in ('h2', 'h3', 'p', 'list')))
+        items.insert(first, {'kind': 'gallery', 'images': imgs})
+    elif len(imgs) == 1 and not quizzes:
+        # Tekst links, foto rechts (zoals op de dia): naast elkaar zetten in plaats van onder elkaar.
+        img = imgs[0]
+        body_entries = [e for e in entries if e['kind'] == 'text' and e is not heading and e['layer'] == 0
+                        and not CREDIT_RE.match(norm(e['text']))]
+        right_edge = max([e['x'] + (e.get('w') or 0) for e in body_entries] or [0])
+        if body_entries and img.get('x', 0) >= right_edge - 40:
+            head = [x for x in items if x['kind'] == 'h2']
+            caps = [x for x in items if x['kind'] == 'caption']
+            rest = [x for x in items if x['kind'] not in ('h2', 'caption', 'image')]
+            if rest and all(x['kind'] in ('p', 'list', 'h3') for x in rest):
+                items = head + [{'kind': 'aside', 'items': rest, 'image': img, 'captions': [c['text'] for c in caps]}]
+    signature = norm(' '.join(item_text(x) for x in items if x['kind'] in ('h2', 'h3', 'p', 'list', 'labelrows', 'cards', 'aside')))
     return items, (norm(heading['text']) if heading is not None else ''), signature
+
+
+def item_text(x):
+    """Platte tekst van een modelitem (voor dubbele dia's en de controle op volledigheid)."""
+    k = x['kind']
+    r = lambda runs: ''.join(t for t, _ in runs)
+    bi = lambda items: ' '.join(r(runs) for _, runs, _ in items)
+    if k in ('h2', 'h3', 'formula', 'caption', 'note'):
+        return x['text']
+    if k == 'p':
+        return r(x['runs'])
+    if k == 'list':
+        return ' '.join(r(li['runs']) for li in x['items'])
+    if k == 'labelrows':
+        return ' '.join(l + ' ' + bi(v) for l, v in x['rows'])
+    if k == 'cards':
+        return ' '.join(t + ' ' + bi(v) for t, v in x['cards'])
+    if k == 'aside':
+        return ' '.join(item_text(i) for i in x['items']) + ' ' + ' '.join(x.get('captions') or [])
+    return ''
 
 
 def build_document(course):
@@ -1171,6 +1295,22 @@ def render(chapters, title, out_path):
 
 def flowable_for(it, S, W):
     k = it['kind']
+    if k in ('labelrows', 'cards', 'aside'):
+        fl = []
+        if k == 'labelrows':
+            for l, v in it['rows']:
+                fl.append(Paragraph('<b>%s</b>  %s' % (esc(l), ' '.join(runs_to_markup(r) for _, r, _ in v)), S['body']))
+        elif k == 'cards':
+            for t, v in it['cards']:
+                fl.append(Paragraph('<b>%s</b>  %s' % (esc(t), ' '.join(runs_to_markup(r) for _, r, _ in v)), S['body']))
+        else:
+            fl += [f for f in (flowable_for(x, S, W) for x in it['items']) if f is not None]
+            img = dict(it['image'], kind='image')
+            f = flowable_for(img, S, W)
+            if f is not None:
+                fl.append(f)
+            fl += [Paragraph(esc(c), S['caption']) for c in it.get('captions') or []]
+        return KeepTogether(fl) if fl else None
     if k == 'p':
         return para(it['runs'], S['body'])
     if k == 'list':
@@ -1307,8 +1447,43 @@ def h_quiz(q):
     return '<div class="quiz">' + ''.join(body) + '</div>'
 
 
+def h_blockitems(blockitems):
+    """Lijst van (kind, runs, tag) uit block_to_items -> HTML (alinea's en eenvoudige lijsten)."""
+    out, lst = [], None
+    for kind, runs, tag in merge_broken_tuples(blockitems):
+        if kind == 'li':
+            base, level = split_tag(tag)
+            if lst is None:
+                out.append('<%s>' % base)
+                lst = base
+            out.append('<li>' + h_runs(runs) + '</li>')
+        else:
+            if lst:
+                out.append('</%s>' % lst)
+                lst = None
+            out.append('<p>' + h_runs(runs) + '</p>')
+    if lst:
+        out.append('</%s>' % lst)
+    return ''.join(out)
+
+
 def h_item(it):
     k = it['kind']
+    if k == 'labelrows':
+        rows = ''.join('<div class="labelrow"><div class="lbl">%s</div><div class="val">%s</div></div>' % (esc(l), h_blockitems(v))
+                       for l, v in it['rows'])
+        return '<div class="labelrows">%s</div>' % rows
+    if k == 'cards':
+        cs = ''.join('<div class="slcard"><div class="slcard-title">%s</div>%s</div>' % (esc(t), h_blockitems(v)) for t, v in it['cards'])
+        n = len(it['cards'])
+        return '<div class="slcards n%d">%s</div>' % (min(n, 3) if n > 1 else 2, cs)
+    if k == 'aside':
+        img = it['image']
+        if not img.get('data'):
+            return ''.join(h_item(x) for x in it['items'])
+        caps = ''.join('<figcaption>%s</figcaption>' % esc(c) for c in it.get('captions') or [])
+        return ('<div class="image-aside"><div class="text">%s</div><figure><img src="%s" alt="%s">%s</figure></div>'
+                % (''.join(h_item(x) for x in it['items']), img['data'], esc(img.get('alt', '')), caps))
     if k == 'h2':
         return '<h2 class="section">%s</h2>' % esc(it['text'])
     if k == 'h3':
@@ -1347,6 +1522,18 @@ def render_html(chapters, title):
         secs.append('<section class="chapter"><div class="chapter-header"><p class="kicker">Hoofdstuk %d</p><h1>%s</h1></div>%s</section>'
                     % (ch['n'], esc(ch['title']), body))
     css = rise_css().replace('__CPE_TITLE__', title.replace('\\', '\\\\').replace('"', '\\"'))
+    css += ('\n.labelrows { margin: .6em 0 1.6em; }'
+            '\n.labelrow { display: flex; gap: 1.2em; align-items: center; margin: 0 0 .9em; break-inside: avoid; }'
+            '\n.labelrow .lbl { flex: 0 0 34%; background: #14324f; color: #fff; font-weight: 700; font-size: .95em; letter-spacing: .02em;'
+            ' padding: .45em 1.6em .45em .9em; border-radius: 6px 0 0 6px; clip-path: polygon(0 0, calc(100% - 1em) 0, 100% 50%, calc(100% - 1em) 100%, 0 100%); }'
+            '\n.labelrow .val { flex: 1 1 auto; }'
+            '\n.labelrow .val p { margin: 0; }'
+            '\n.slcards { display: grid; gap: 1em; margin: .8em 0 1.6em; }'
+            '\n.slcards.n2 { grid-template-columns: 1fr 1fr; } .slcards.n3 { grid-template-columns: 1fr 1fr 1fr; }'
+            '\n.slcard { border: 1px solid #d9d9d9; border-radius: 6px; padding: .9em 1.1em; break-inside: avoid; }'
+            '\n.slcard .slcard-title { font-weight: 700; margin-bottom: .4em; }'
+            '\n.slcard p:last-child { margin-bottom: 0; }'
+            '\n.image-aside figcaption { text-align: left; }')
     css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
     return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
             '<body class="forms sl">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
@@ -1394,6 +1581,8 @@ def main():
             if it['kind'] == 'gallery':
                 for im in it['images']:
                     im['data'] = course.images.get(im['url'], '')
+            if it['kind'] == 'aside':
+                it['image']['data'] = course.images.get(it['image']['url'], '')
     if a.model:
         with open(a.model, 'w', encoding='utf-8') as f:
             json.dump([{**ch, 'items': [{k: v for k, v in i.items() if k not in ('data', 'images')} for i in ch['items']]} for ch in chapters],
