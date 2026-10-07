@@ -2169,6 +2169,13 @@ def render_html(chapters, title, version=''):
             '\n.popup .pu-body { padding: .7em 1em .8em; }'
             '\n.popup .pu-body p:last-child { margin-bottom: 0; }'
             '\n.keep-pair { break-inside: avoid; }'
+            # Storyline: elke alinea/lijst is een los blok; met de Rise-blokmarge (1.5em) + lijstmarges wordt dat te los.
+            '\n.sl .block { margin: 0 0 .85em; }'
+            '\n.sl .block > p:last-child { margin-bottom: 0; }'
+            '\n.sl .block > ul, .sl .block > ol { margin: 0; padding-left: 1.5em; }'
+            '\n.sl .block li { margin: 0 0 .3em; }'
+            '\n.sl .block li:last-child { margin-bottom: 0; }'
+            '\n.sl .block:has(+ .block > ul), .sl .block:has(+ .block > ol) { margin-bottom: .4em; }'  # 'Verder:' + lijst
             '\n.quiz figure.solution { margin: .6em 0 .9em; }'
             '\n.quiz .answer figure.fb-image { margin: .6em 0 0; }'
             '\nfigure.figcaps { margin: .8em 0 1.1em; break-inside: avoid; }'
