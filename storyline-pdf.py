@@ -72,7 +72,9 @@ NAV_SENTENCE_RE = re.compile(
     r'|je kunt (de|deze) e-module (hieronder |nu )?afsluiten'
     r'|(of )?je kunt (het|dit) (scherm|tabblad)( in je browser)? (nu )?sluiten'
     r'|je bent aan het (eind|einde) van (deze|de) e-module gekomen'
-    r'|e-module afsluiten)[.!]?$', re.I)
+    r'|e-module afsluiten'
+    r'|beweeg je muis over\b.*'
+    r'|klik op (de|het) (begrip|begrippen|woord|woorden|rode woorden|onderstreepte woorden?)\b.*\bvoor (meer )?(uitleg|informatie|voorbeelden)\.?)[.!]?$', re.I)
 
 
 def is_nav_only(text):
@@ -120,6 +122,17 @@ class Course:
                 self.meta[sid] = m
                 self.order.append(sid)
         self.entry_scene = str(self.data.get('entryPoint') or '').replace('_player.', '').split('.')[0]
+        # Versieregel van de titeldia ('Versie 1 / september 2022') voor op het omslag.
+        self.version = ''
+        for sid in self.order:
+            if self.version or not re.search(r'titel|welkom', self.meta.get(sid, {}).get('title') or '', re.I):
+                continue
+            for L in (self.slides.get(sid) or {}).get('slideLayers') or []:
+                for it in self.flatten(L):
+                    for blk in self.text_blocks(it['ob']) or []:
+                        t = norm(blk['text'])
+                        if not self.version and re.match(r'^versie\b', t, re.I) and len(t) <= 50:
+                            self.version = t
         self._chrome()
 
     # -- dia-objecten plat maken (groepen tellen hun eigen offset op)
@@ -281,9 +294,14 @@ class Course:
         layer_ids = {}
         entries = []
         seen = set()
+        # Lagen die alleen bij een fout antwoord verschijnen: overslaan. (Ze bevatten vaak exact dezelfde uitleg als
+        # de 'juist'-laag; zouden ze eerst gelezen worden, dan valt die uitleg weg als dubbele tekst.)
+        wrong_layers = set()
+        for inter in interactions:
+            wrong_layers |= feedback_layers(inter)[1] - feedback_layers(inter)[0]
         for li, L in enumerate(sl.get('slideLayers') or []):
             layer_ids[li] = L.get('id')
-            if self.is_chrome_layer(L) or self.is_tutorial_layer(L):
+            if self.is_chrome_layer(L) or self.is_tutorial_layer(L) or L.get('id') in wrong_layers:
                 continue
             for it in self.flatten(L):
                 ob = it['ob']
@@ -312,13 +330,18 @@ class Course:
                     entries.append(dict(base, kind='image', url=url, w=ob.get('width') or 0, h=ob.get('height') or 0, alt=norm(alt)))
                 blocks = self.text_blocks(ob)
                 if blocks:
-                    # Losse navigatie-alinea's binnen een tekstvak ('Klik op volgende om naar X te gaan.').
-                    blocks = [b for b in blocks if not is_nav_only(b['text'])] or None
+                    # Losse navigatie-alinea's binnen een tekstvak ('Klik op volgende om naar X te gaan.') en alinea's met
+                    # een spelervariabele ('… het hoofdstuk %_player.HFDSTKtitel_01% gekomen.'); de rest van het vak blijft.
+                    blocks = [b for b in blocks if not is_nav_only(b['text']) and not re.search(r'%[A-Za-z_][A-Za-z0-9_.]*%', b['text'])] or None
                 if not blocks:
                     continue
-                if ob.get('accType') == 'button':
-                    continue
                 full = norm(' '.join(b['text'] for b in blocks))
+                popup_title = False
+                if ob.get('accType') == 'button':
+                    # Kopbalk van een pop-uplaag ('Inwendige verbranding' met sluitknop) is de titel van die uitleg.
+                    if li == 0 or L.get('isBaseLayer') or len(full) > 60 or self.is_chrome_text(full):
+                        continue
+                    popup_title = True
                 if self.is_chrome_text(full):
                     continue
                 if is_nav_only(full):
@@ -328,7 +351,7 @@ class Course:
                 if ('t:' + full) in seen:
                     continue
                 seen.add('t:' + full)
-                entries.append(dict(base, kind='text', blocks=blocks, text=full, size=max(b['size'] for b in blocks),
+                entries.append(dict(base, kind='text', blocks=blocks, text=full, size=max(b['size'] for b in blocks), popup_title=popup_title,
                                     is_choice=full in choice_texts or full.lower() in choice_texts, acc=ob.get('accType'),
                                     all_bold=all(s['bold'] for b in blocks for s in b['spans'] if norm(s['text'])),
                                     w=ob.get('width') or 0, h=ob.get('height') or 0))
@@ -435,6 +458,74 @@ def structure_entries(entries):
         for im, t in fs:
             used.add(id(im))
             used.add(id(t))
+    texts = [t for t in texts if id(t) not in used]
+
+    # --- tabel: losse tekstvakken die in rijen en kolommen staan (bv. 1 mA | tinteling)
+    by_layer = {}
+    for t in texts:
+        if not t.get('gid') and len(t['blocks']) == 1 and len(norm(t['text'])) <= 80 and (t.get('h') or 0) <= 120:
+            by_layer.setdefault(t['layer'], []).append(t)
+    for layer, cand in by_layer.items():
+        xs = sorted({round(t['x']) for t in cand})
+        clusters = []
+        for x in xs:
+            if clusters and x - clusters[-1][-1] <= 25:
+                clusters[-1].append(x)
+            else:
+                clusters.append([x])
+        col_of = lambda t: next(i for i, c in enumerate(clusters) if c[0] - 1 <= round(t['x']) <= c[-1] + 1)
+        rows = []
+        for t in sorted(cand, key=lambda t: t['y'] + (t.get('h') or 0) / 2):
+            yc = t['y'] + (t.get('h') or 0) / 2
+            if rows and abs(yc - rows[-1]['yc']) <= 0.5 * max(t.get('h') or 1, 1):
+                rows[-1]['cells'].append(t)
+            else:
+                rows.append({'yc': yc, 'cells': [t]})
+        best, cur = [], []
+        for r in rows:
+            cols = tuple(sorted({col_of(c) for c in r['cells']}))
+            ok = len(cols) >= 2 and len(cols) == len(r['cells'])
+            if ok and (not cur or cols == cur[0][0]):
+                cur.append((cols, r))
+            else:
+                if len(cur) > len(best):
+                    best = cur
+                cur = [(cols, r)] if ok else []
+        if len(cur) > len(best):
+            best = cur
+        if len(best) >= 3:
+            first = min((c for _, r in best for c in r['cells']), key=lambda c: (c['y'], c['x']))
+            table_rows = [[c['blocks'] for c in sorted(r['cells'], key=lambda c: c['x'])] for _, r in best]
+            entries.append({'kind': 'table', 'layer': layer, 'x': first['x'], 'y': first['y'], 'gx': first['x'], 'gy': first['y'],
+                            'rows': table_rows, 'text': '', 'size': 0})
+            for _, r in best:
+                for c in r['cells']:
+                    used.add(id(c))
+    texts = [t for t in texts if id(t) not in used]
+
+    # --- tegels: een tekstvak (titel + tekst) met een los vakje dat er bovenop ligt (bv. 'offensief binnen')
+    tiles = []
+    for box in texts:
+        if len(box['blocks']) < 2 or len(norm(box['blocks'][0]['text'])) > 40:
+            continue
+        bx0, by0 = box['x'], box['y']
+        bx1, by1 = bx0 + (box.get('w') or 0), by0 + (box.get('h') or 0)
+        inner = [t for t in texts if t is not box and t['layer'] == box['layer'] and len(t['blocks']) == 1
+                 and t['x'] >= bx0 - 5 and t['x'] + (t.get('w') or 0) <= bx1 + 5 and t['y'] >= by0 and t['y'] + (t.get('h') or 0) <= by1 + 5]
+        if inner:
+            tiles.append((box, sorted(inner, key=lambda t: t['y'])))
+    if len(tiles) >= 2:
+        tiles.sort(key=lambda bt: (bt[0]['y'], bt[0]['x']))
+        b0 = tiles[0][0]
+        # Tegels staan meestal in de rechterkolom naast de uitleg ('Je ziet deze hiernaast'): na de tekst plaatsen.
+        right_col = all(bt[0]['x'] > min((t['x'] for t in texts if t not in [x[0] for x in tiles]), default=1e9) + 200 for bt in tiles)
+        tile_gy = 1e5 if right_col else b0['y']
+        entries.append({'kind': 'cards', 'layer': b0['layer'], 'x': b0['x'], 'y': tile_gy, 'gx': b0['x'], 'gy': tile_gy, 'text': '', 'size': 0,
+                        'cards': [(norm(box['blocks'][0]['text']), box['blocks'][1:] + [blk for t in inner for blk in t['blocks']]) for box, inner in tiles]})
+        for box, inner in tiles:
+            used.add(id(box))
+            for t in inner:
+                used.add(id(t))
     texts = [t for t in texts if id(t) not in used]
 
     # --- labelrijen
@@ -856,7 +947,9 @@ def merge_broken_paragraphs(items):
         if it['kind'] == 'p' and out and out[-1]['kind'] == 'p':
             prev = ''.join(r[0] for r in out[-1]['runs']).rstrip()
             cur = ''.join(r[0] for r in it['runs']).lstrip()
-            if prev and cur and not re.search(r'[.!?:;)\]"\u201d]$', prev) and cur[0].islower():
+            # Alleen binnen hetzelfde tekstvak: losse vakjes (tabelcellen, tegels) nooit aan elkaar plakken.
+            same_box = it.get('src') is not None and it.get('src') == out[-1].get('src')
+            if same_box and prev and cur and not re.search(r'[.!?:;)\]"\u201d]$', prev) and cur[0].islower():
                 out[-1]['runs'] = out[-1]['runs'] + [(' ', False)] + it['runs']
                 continue
         out.append(it)
@@ -891,11 +984,33 @@ def slide_model(course, sid, suppress_heading=False):
         quizzes, used, consumed_layers = build_reflection(entries, heading)
     if heading is not None and heading in used:
         heading = None
+    # Pop-uplagen (klik op een begrip -> kader met uitleg): als kader met titel bij het begrip zetten.
+    popups = []
+    popup_ids = IdSet()
+    if not quizzes:
+        for li in sorted({e['layer'] for e in entries if e['layer'] > 0}):
+            if li in consumed_layers:
+                continue
+            les = [e for e in entries if e['layer'] == li and e['kind'] == 'text' and not e.get('is_choice')]
+            if not les:
+                continue
+            les.sort(key=lambda e: (e['y'], e['x']))
+            title = les[0] if (les[0].get('popup_title') or (_is_label(les[0]) and len(les) > 1)) else None
+            body = [e for e in les if e is not title]
+            if not body:
+                continue
+            popups.append({'kind': 'popup', 'title': norm(title['text']) if title else '',
+                           'items': [it for e in body for b in e['blocks'] for it in block_to_items(b)]})
+            for e in les:
+                popup_ids.add(e)
+
     if heading is not None and not suppress_heading:
         items.append({'kind': 'h2', 'text': norm(heading['text'])})
     quiz_placed = False
     for e in entries:
-        if e is heading or e in used or e.get('is_choice') or e['kind'] == 'input':
+        if e is heading or e in used or e in popup_ids or e.get('is_choice') or e['kind'] == 'input':
+            continue
+        if e.get('popup_title'):
             continue
         if e['layer'] in consumed_layers:
             continue
@@ -927,11 +1042,13 @@ def slide_model(course, sid, suppress_heading=False):
                     else:
                         if items and items[-1]['kind'] == 'list':
                             items[-1]['open'] = False
-                        items.append({'kind': 'p', 'runs': runs})
+                        items.append({'kind': 'p', 'runs': runs, 'src': e.get('id')})
             if items and items[-1]['kind'] == 'list':
                 items[-1]['open'] = False
         elif e['kind'] == 'labelrows':
             items.append({'kind': 'labelrows', 'rows': [(lab, [it for b in blocks for it in block_to_items(b)]) for lab, blocks in e['rows']]})
+        elif e['kind'] == 'table':
+            items.append({'kind': 'table', 'rows': [[[it for b in cell for it in block_to_items(b)] for cell in row] for row in e['rows']]})
         elif e['kind'] == 'figrow':
             items.append({'kind': 'figrow', 'figs': [dict(f, items=[it for b in f['blocks'] for it in block_to_items(b)]) for f in e['figs']]})
         elif e['kind'] == 'cards':
@@ -942,6 +1059,17 @@ def slide_model(course, sid, suppress_heading=False):
             items.append({'kind': 'note', 'text': e['text']})
     if quizzes and not quiz_placed:
         items.extend(quizzes)
+    # Pop-ups direct na de regel die het begrip noemt, anders na de tekst van de dia.
+    for pu in popups:
+        key = pu['title'].lower()
+        at = None
+        if key:
+            for i, x in enumerate(items):
+                if x['kind'] in ('p', 'list', 'h3') and key in item_text(x).lower():
+                    at = i
+        if at is None:
+            at = max([i for i, x in enumerate(items) if x['kind'] in ('p', 'list', 'h3', 'aside')] or [len(items) - 1])
+        items.insert(at + 1, pu)
     # Hoofdstuk-overzicht (titel + onderwerpen onder elkaar, zoals op de verdeeldia): één overzichtskader.
     body_texts = [e for e in entries if e['kind'] == 'text' and e is not heading and not e.get('is_choice')]
     others = [e for e in entries if e['kind'] not in ('text',)]
@@ -982,7 +1110,7 @@ def slide_model(course, sid, suppress_heading=False):
             rest = [x for x in items if x['kind'] not in ('h2', 'caption', 'image')]
             if rest and all(x['kind'] in ('p', 'list', 'h3') for x in rest):
                 items = head + [{'kind': 'aside', 'items': rest, 'image': img, 'captions': [c['text'] for c in caps]}]
-    signature = norm(' '.join(item_text(x) for x in items if x['kind'] in ('h2', 'h3', 'p', 'list', 'labelrows', 'cards', 'aside', 'figrow', 'overview')))
+    signature = norm(' '.join(item_text(x) for x in items if x['kind'] in ('h2', 'h3', 'p', 'list', 'labelrows', 'cards', 'aside', 'figrow', 'overview', 'table', 'popup')))
     return items, (norm(heading['text']) if heading is not None else ''), signature
 
 
@@ -1005,8 +1133,12 @@ def item_text(x):
         return ' '.join(item_text(i) for i in x['items']) + ' ' + ' '.join(x.get('captions') or [])
     if k == 'figrow':
         return ' '.join(bi(f['items']) for f in x['figs'])
+    if k == 'table':
+        return ' '.join(bi(cell) for row in x['rows'] for cell in row)
     if k == 'overview':
         return ' '.join(x['topics'])
+    if k == 'popup':
+        return x['title'] + ' ' + bi(x['items'])
     return ''
 
 
@@ -1374,6 +1506,11 @@ def render(chapters, title, out_path):
 
 def flowable_for(it, S, W):
     k = it['kind']
+    if k == 'popup':
+        return KeepTogether(([Paragraph('<b>%s</b>' % esc(it['title']), S['body'])] if it['title'] else []) +
+                            [Paragraph(runs_to_markup(r), S['body']) for _, r, _ in it['items']])
+    if k == 'table':
+        return KeepTogether([Paragraph(' — '.join(' '.join(runs_to_markup(r) for _, r, _ in cell) for cell in row), S['body']) for row in it['rows']])
     if k == 'overview':
         return Paragraph('<b>In dit hoofdstuk:</b> ' + ', '.join(esc(t) for t in it['topics']), S['body'])
     if k == 'figrow':
@@ -1536,10 +1673,11 @@ def h_quiz(q):
     return '<div class="quiz">' + ''.join(body) + '</div>'
 
 
-def h_blockitems(blockitems):
-    """Lijst van (kind, runs, tag) uit block_to_items -> HTML (alinea's en eenvoudige lijsten)."""
+def h_blockitems(blockitems, merge=True):
+    """Lijst van (kind, runs, tag) uit block_to_items -> HTML (alinea's en eenvoudige lijsten).
+    merge=False voor inhoud die uit meerdere losse vakjes komt (kaarten, tegels, tabellen)."""
     out, lst = [], None
-    for kind, runs, tag in merge_broken_tuples(blockitems):
+    for kind, runs, tag in (merge_broken_tuples(blockitems) if merge else blockitems):
         if kind == 'li':
             base, level = split_tag(tag)
             if lst is None:
@@ -1556,20 +1694,33 @@ def h_blockitems(blockitems):
     return ''.join(out)
 
 
+def h_cell(items):
+    """Celinhoud. Eén regel met een opsommingsstreepje (' - 1 mA') wordt zonder streepje getoond: de cel is al een rij."""
+    if len(items) == 1:
+        return h_runs(items[0][1])
+    return h_blockitems(items, merge=False)
+
+
 def h_item(it):
     k = it['kind']
+    if k == 'popup':
+        head = '<div class="pu-head">%s</div>' % esc(it['title']) if it['title'] else ''
+        return '<div class="popup%s">%s<div class="pu-body">%s</div></div>' % ('' if it['title'] else ' untitled', head, h_blockitems(it['items']))
+    if k == 'table':
+        rows = ''.join('<tr>%s</tr>' % ''.join('<td>%s</td>' % h_cell(c) for c in row) for row in it['rows'])
+        return '<table class="sltable">%s</table>' % rows
     if k == 'overview':
         return '<div class="overview"><div class="ov-head">In dit hoofdstuk</div><ul>%s</ul></div>' % ''.join('<li>%s</li>' % esc(t) for t in it['topics'])
     if k == 'figrow':
         figs = ''.join('<figure><div class="ph"><img src="%s" alt="%s"></div><figcaption>%s</figcaption></figure>'
-                       % (f['data'], esc(f.get('alt', '')), h_blockitems(f['items'])) for f in it['figs'] if f.get('data'))
+                       % (f['data'], esc(f.get('alt', '')), h_blockitems(f['items'], merge=False)) for f in it['figs'] if f.get('data'))
         return '<div class="figrow n%d">%s</div>' % (min(len(it['figs']), 5), figs)
     if k == 'labelrows':
         rows = ''.join('<div class="labelrow"><div class="lbl">%s</div><div class="val">%s</div></div>' % (esc(l), h_blockitems(v))
                        for l, v in it['rows'])
         return '<div class="labelrows">%s</div>' % rows
     if k == 'cards':
-        cs = ''.join('<div class="slcard"><div class="slcard-title">%s</div>%s</div>' % (esc(t), h_blockitems(v)) for t, v in it['cards'])
+        cs = ''.join('<div class="slcard"><div class="slcard-title">%s</div>%s</div>' % (esc(t), h_blockitems(v, merge=False)) for t, v in it['cards'])
         n = len(it['cards'])
         return '<div class="slcards n%d">%s</div>' % (min(n, 3) if n > 1 else 2, cs)
     if k == 'aside':
@@ -1606,14 +1757,26 @@ def h_item(it):
     return ''
 
 
-def render_html(chapters, title):
+def render_html(chapters, title, version=''):
     _OPT_SEQ[0] = 0
     toc = ''.join('<li><span class="tn">%s</span>%s</li>' % (('%d.' % ch['num']) if ch.get('num') else '', esc(ch['title'])) for ch in chapters)
-    cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>'
-             '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div></section>') % (esc(title), toc)
+    ver = '<p class="cover-version">%s</p>' % esc(version) if version else ''
+    cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>%s'
+             '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div></section>') % (esc(title), ver, toc)
     secs = []
     for ch in chapters:
-        body = ''.join(h_item(it) for it in ch['items'])
+        parts, its = [], ch['items']
+        for i, it in enumerate(its):
+            nxt = its[i + 1] if i + 1 < len(its) else None
+            if it['kind'] == 'popup' and parts and parts[-1][0]:
+                continue  # al samen met het begrip gezet
+            if nxt is not None and nxt['kind'] == 'popup' and nxt['title'] and it['kind'] in ('p', 'list', 'h3') \
+                    and nxt['title'].lower() in item_text(it).lower():
+                # begrip + uitleg bij elkaar houden (niet over een paginagrens splitsen)
+                parts.append((True, '<div class="keep-pair">%s%s</div>' % (h_item(it), h_item(nxt))))
+            else:
+                parts.append((False, h_item(it)))
+        body = ''.join(h for _, h in parts)
         kicker = '<p class="kicker">Hoofdstuk %d</p>' % ch['num'] if ch.get('num') else ''
         secs.append('<section class="chapter"><div class="chapter-header">%s<h1>%s</h1></div>%s</section>'
                     % (kicker, esc(ch['title']), body))
@@ -1630,6 +1793,7 @@ def render_html(chapters, title):
             '\n.slcard .slcard-title { font-weight: 700; margin-bottom: .4em; }'
             '\n.slcard p:last-child { margin-bottom: 0; }'
             '\n.image-aside figcaption { text-align: left; }'
+            '\n.cover .cover-version { color: #555; margin: -.6em 0 0; }'
             '\n.cover .toc ul.toc-list { list-style: none; margin: 0; padding: 0; font-size: 12pt; line-height: 1.7; }'
             '\n.cover .toc .tn { display: inline-block; min-width: 1.8em; color: #bc1413; }'
             '\n.overview { border: 1px solid #cfd6dc; border-radius: 8px; overflow: hidden; max-width: 75%; margin: .4em 0 1.8em; break-inside: avoid; }'
@@ -1643,17 +1807,28 @@ def render_html(chapters, title):
             '\n.figrow .ph { height: 34mm; display: flex; align-items: flex-end; justify-content: center; }'
             '\n.figrow .ph img { max-height: 34mm; max-width: 100%; width: auto; margin: 0; }'
             '\n.figrow figcaption { font-size: 9.5pt; line-height: 1.35; color: #333; font-style: italic; text-align: center; margin-top: .5em; }'
-            '\n.figrow figcaption p { margin: 0; }')
+            '\n.figrow figcaption p { margin: 0; }'
+            '\ntable.sltable { width: auto; min-width: 60%; border-collapse: collapse; margin: .6em 0 1.6em; font-size: 1em; break-inside: avoid; }'
+            '\ntable.sltable td { border: none; border-bottom: 1px solid #e3e6e9; padding: .35em 1.4em .35em 0; vertical-align: top; }'
+            '\ntable.sltable td:first-child { white-space: nowrap; font-weight: 700; color: #14324f; }'
+            '\ntable.sltable tr:last-child td { border-bottom: none; }'
+            '\n.popup { border: 2px solid #14324f; margin: .5em 0 1.4em 1.5em; break-inside: avoid; }'
+            '\n.popup .pu-head { background: #14324f; color: #fff; font-weight: 700; padding: .45em 1em; }'
+            '\n.popup .pu-body { padding: .7em 1em .8em; }'
+            '\n.popup .pu-body p:last-child { margin-bottom: 0; }'
+            '\n.keep-pair { break-inside: avoid; }'
+            '\n.popup.untitled { border: none; border-left: 3px solid #14324f; background: #f4f6f8; }'
+            '\n.popup.untitled .pu-body { padding: .55em 1em .6em; }')
     css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
     return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
             '<body class="forms sl">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
 
 
-def render_via_chrome(chapters, title, out_pdf):
+def render_via_chrome(chapters, title, out_pdf, version=''):
     """Zelfde route als de Rise-export: HTML + book-to-print.py --ready (Chrome-print + invulbare vakjes)."""
     import subprocess
     import tempfile
-    html_s = render_html(chapters, title)
+    html_s = render_html(chapters, title, version)
     here = os.path.dirname(os.path.abspath(__file__))
     tmp = os.path.join(tempfile.gettempdir(), safe_name(title) + '.print.html')
     with open(tmp, 'w', encoding='utf-8') as f:
@@ -1709,7 +1884,7 @@ def main():
     if a.reportlab:
         render(chapters, course.title, out)
     else:
-        render_via_chrome(chapters, course.title, out)
+        render_via_chrome(chapters, course.title, out, course.version)
     print('OK', out)
 
 
