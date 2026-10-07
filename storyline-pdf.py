@@ -1216,6 +1216,157 @@ def flowable_for(it, S, W):
     return None
 
 
+
+# ----------------------------------------------------------------------------- opmaak (HTML, zelfde stijl als Rise-export)
+
+def rise_css():
+    """Gedeelde print-CSS uit book-to-print.py (één bron voor Rise én Storyline)."""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location('book_to_print', os.path.join(here, 'book-to-print.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.CSS
+
+
+_OPT_SEQ = [0]
+
+
+def h_runs(runs):
+    return runs_to_markup(runs).replace('<b>', '<strong>').replace('</b>', '</strong>')
+
+
+def h_list(items):
+    """Geneste lijst (level per item) -> ul/ol-HTML."""
+    out = []
+    stack = []  # open tags
+
+    def open_tag(tag):
+        out.append('<%s>' % tag)
+        stack.append(tag)
+
+    def close_to(level):
+        while len(stack) > level:
+            out.append('</li></%s>' % stack.pop())
+    for it in items:
+        level = int(it.get('level') or 0) + 1
+        tag = it.get('tag') or 'ul'
+        if level > len(stack):
+            while len(stack) < level:
+                if stack:
+                    out[-1] = out[-1]  # li blijft open voor sublijst
+                open_tag(tag)
+                if len(stack) < level:
+                    out.append('<li>')
+            out.append('<li>' + h_runs(it['runs']))
+        else:
+            close_to(level)
+            out.append('</li><li>' + h_runs(it['runs']))
+    close_to(0)
+    html_s = ''.join(out)
+    # opruimen: lege <li> die als houder voor een sublijst zijn aangemaakt
+    return html_s.replace('<li><ul>', '<li class="sub"><ul>').replace('<li><ol>', '<li class="sub"><ol>')
+
+
+def h_quiz(q):
+    body = ['<div class="quiz-label">Vraag</div>']
+    qs = []
+    for kind, runs, tag in merge_broken_tuples(q['question']):
+        if kind == 'li':
+            qs.append('<p>• ' + h_runs(runs) + '</p>')
+        else:
+            qs.append('<p>' + h_runs(runs) + '</p>')
+    body.append('<div class="question">' + ''.join(qs) + '</div>')
+    if q.get('prompt'):
+        body.append('<p>' + esc(q['prompt']) + '</p>')
+    if q.get('hotspot'):
+        body.append('<p class="hint">Aanwijsvraag: klik in de e-module de juiste plek(ken) op de afbeelding aan. De juiste plaatsing staat in de toelichting.</p>')
+    if q.get('open'):
+        body.append('<p class="hint">Open vraag: schrijf je antwoord op en vergelijk het met het voorbeeld hieronder.</p>')
+    if q['pairs']:
+        rows = ''.join('<tr><td>%s</td><td>%s <span class="ok">✓</span></td></tr>' % (esc(a), esc(b)) for a, b in q['pairs'])
+        body.append('<table class="matching"><tr><th>Begrip</th><th>Hoort bij</th></tr>' + rows + '</table>')
+    if q['options']:
+        kind_q = 'check' if q.get('multi') else 'radio'
+        lis = []
+        for text, correct in q['options']:
+            _OPT_SEQ[0] += 1
+            m = 'cpeopt%04d' % _OPT_SEQ[0]
+            lis.append('<li data-opt="%s" data-mark="%s"%s><span class="cpe-mark">%s</span>%s</li>' % (
+                esc(text).replace('"', '&quot;'), m, ' data-correct="1" class="correct"' if correct else '', m, esc(text)))
+        body.append('<ul class="options %s">%s</ul>' % (kind_q, ''.join(lis)))
+    if q['answers']:
+        label = 'Juiste antwoorden' if len(q['answers']) > 1 else 'Juiste antwoord'
+        body.append('<div class="answer"><span class="answer-label">%s:</span> %s</div>' % (label, esc(', '.join(q['answers']))))
+    if q['feedback']:
+        fb = []
+        for kind, runs, tag in merge_broken_tuples(q['feedback']):
+            fb.append(('<p>• ' if kind == 'li' else '<p>') + h_runs(runs) + '</p>')
+        body.append('<div class="answer"><span class="answer-label">%s:</span> %s</div>' % (
+            'Voorbeeldantwoord' if q.get('open') else 'Toelichting', ''.join(fb)))
+    return '<div class="quiz">' + ''.join(body) + '</div>'
+
+
+def h_item(it):
+    k = it['kind']
+    if k == 'h2':
+        return '<h2 class="section">%s</h2>' % esc(it['text'])
+    if k == 'h3':
+        return '<h3>%s</h3>' % esc(it['text'])
+    if k == 'p':
+        return '<div class="block"><p>%s</p></div>' % h_runs(it['runs'])
+    if k == 'list':
+        return '<div class="block">%s</div>' % h_list(it['items'])
+    if k == 'formula':
+        return '<div class="block formula"><p>%s</p></div>' % esc(it['text'])
+    if k == 'caption':
+        return '<p class="note">%s</p>' % esc(it['text'])
+    if k == 'note':
+        return '<p class="note">[%s]</p>' % esc(it['text'])
+    if k == 'image':
+        if not it.get('data'):
+            return ''
+        cls = 'wide' if it['w'] > it['h'] * 1.6 else ''
+        return '<figure class="%s"><img src="%s" alt="%s"></figure>' % (cls, it['data'], esc(it.get('alt', '')))
+    if k == 'gallery':
+        figs = ''.join('<figure><img src="%s" alt="%s"></figure>' % (im['data'], esc(im.get('alt', ''))) for im in it['images'] if im.get('data'))
+        return '<div class="gallery">%s</div>' % figs if figs else ''
+    if k == 'quiz':
+        return h_quiz(it)
+    return ''
+
+
+def render_html(chapters, title):
+    _OPT_SEQ[0] = 0
+    toc = ''.join('<li>%s</li>' % esc(ch['title']) for ch in chapters)
+    cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>'
+             '<div class="toc"><h2>Inhoud</h2><ol>%s</ol></div></section>') % (esc(title), toc)
+    secs = []
+    for ch in chapters:
+        body = ''.join(h_item(it) for it in ch['items'])
+        secs.append('<section class="chapter"><div class="chapter-header"><p class="kicker">Hoofdstuk %d</p><h1>%s</h1></div>%s</section>'
+                    % (ch['n'], esc(ch['title']), body))
+    css = rise_css().replace('__CPE_TITLE__', title.replace('\\', '\\\\').replace('"', '\\"'))
+    css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
+    return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
+            '<body class="forms sl">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
+
+
+def render_via_chrome(chapters, title, out_pdf):
+    """Zelfde route als de Rise-export: HTML + book-to-print.py --ready (Chrome-print + invulbare vakjes)."""
+    import subprocess
+    import tempfile
+    html_s = render_html(chapters, title)
+    here = os.path.dirname(os.path.abspath(__file__))
+    tmp = os.path.join(tempfile.gettempdir(), safe_name(title) + '.print.html')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(html_s)
+    r = subprocess.run([sys.executable, os.path.join(here, 'book-to-print.py'), tmp, '--ready', '--html', tmp, '--pdf', out_pdf],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit('book-to-print.py mislukt:\n' + r.stdout + r.stderr)
+    print(r.stdout.strip())
+
 # ----------------------------------------------------------------------------- main
 
 def safe_name(title):
@@ -1230,6 +1381,7 @@ def main():
     ap.add_argument('--pdf')
     ap.add_argument('--report', action='store_true')
     ap.add_argument('--model', help='schrijf het documentmodel als JSON (debug)')
+    ap.add_argument('--reportlab', action='store_true', help='oude ReportLab-opmaak i.p.v. de Rise-stijl via Chrome')
     a = ap.parse_args()
     with open(a.dump, encoding='utf-8') as f:
         dump = json.load(f)
@@ -1252,7 +1404,10 @@ def main():
             print('%2d %-50s %s' % (ch['n'], ch['title'][:50], dict(kinds)))
     out = a.pdf or os.path.join(os.path.dirname(os.path.abspath(a.dump)),
                                 safe_name(course.title) + '-' + datetime.datetime.now().strftime('%Y-%m-%d_%H%M') + '.pdf')
-    render(chapters, course.title, out)
+    if a.reportlab:
+        render(chapters, course.title, out)
+    else:
+        render_via_chrome(chapters, course.title, out)
     print('OK', out)
 
 
