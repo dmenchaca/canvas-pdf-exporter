@@ -111,6 +111,10 @@ class Course:
         self.images = dump.get('images') or {}
         self.asset_by_id = {a.get('id'): a for a in (self.data.get('assetLib') or [])}
         self.meta = {}
+        # Tekstvariabelen met hun startwaarde (bv. HFDSTKtitel_03 = 'Handelingsperspectieven'): de hoofdstuktitel
+        # op de verdeeldia is zo'n variabele.
+        self.variables = {v.get('name'): v.get('value') for v in (dump.get('data') or {}).get('variables') or []
+                          if v.get('type') == 'string' and isinstance(v.get('value'), str)}
         self.order = []
         for sc in self.data.get('scenes') or []:
             for s in sc.get('slides') or []:
@@ -193,6 +197,27 @@ class Course:
             return sum(ImageStat.Stat(ImageChops.difference(*ims)).mean) < 12
         except Exception:
             return False
+
+    def divider_title(self, sid):
+        """Hoofdstuktitel zoals op de verdeeldia ('3 Handelingsperspectieven'), als die uit een spelervariabele komt."""
+        sl = self.slides.get(sid)
+        if not sl or not sl.get('slideLayers'):
+            return ''
+        for it in self.flatten(sl['slideLayers'][0]):
+            for b in self.text_blocks(it['ob']) or []:
+                m = re.fullmatch(r'\s*%_player\.(HFDSTKtitel_\d+)%\s*', b['text'])
+                if m and b['size'] >= 40 and norm(self.variables.get(m.group(1)) or ''):
+                    return norm(self.variables[m.group(1)])
+        # Anders: de grote titeltekst naast het grote hoofdstuknummer ('2' + 'Elektriciteit' / 'en risico's').
+        big = [(it['y'], it['x'], b) for it in self.flatten(sl['slideLayers'][0]) for b in self.text_blocks(it['ob']) or []]
+        if not any(b['size'] >= 150 and re.fullmatch(r'\s*\d+\s*', b['text']) for _, _, b in big):
+            return ''
+        lines = [norm(b['text']) for _, _, b in sorted(big, key=lambda t: (t[0], t[1]))
+                 if b['size'] >= 60 and not re.fullmatch(r'\s*\d+\s*', b['text']) and '%' not in b['text'] and norm(b['text'])]
+        out = ''
+        for ln in lines:
+            out = out[:-1] + ln if out.endswith('-') else (out + ' ' + ln).strip()  # 'elektriciteits-' + 'netwerk'
+        return out
 
     def image_url(self, ob):
         il = ob.get('imagelib') or []
@@ -1236,16 +1261,16 @@ def slide_model(course, sid, suppress_heading=False):
             if items and items[-1]['kind'] == 'list':
                 items[-1]['open'] = False
         elif e['kind'] == 'labelrows':
-            items.append({'kind': 'labelrows', 'rows': [(lab, [it for b in blocks for it in block_to_items(b)]) for lab, blocks in e['rows']]})
+            items.append({'kind': 'labelrows', 'rows': [(lab, blocks_items(blocks)) for lab, blocks in e['rows']]})
         elif e['kind'] == 'table':
-            items.append({'kind': 'table', 'rows': [[[it for b in cell for it in block_to_items(b)] for cell in row] for row in e['rows']]})
+            items.append({'kind': 'table', 'rows': [[blocks_items(cell) for cell in row] for row in e['rows']]})
         elif e['kind'] == 'figcaps':
             items.append({'kind': 'figcaps', 'url': e['url'], 'w': e['w'], 'h': e['h'], 'alt': e['alt'],
-                          'caps': [[it for b in blocks for it in block_to_items(b)] for blocks in e['caps']]})
+                          'caps': [blocks_items(blocks) for blocks in e['caps']]})
         elif e['kind'] == 'figrow':
-            items.append({'kind': 'figrow', 'figs': [dict(f, items=[it for b in f['blocks'] for it in block_to_items(b)]) for f in e['figs']]})
+            items.append({'kind': 'figrow', 'figs': [dict(f, items=blocks_items(f['blocks'])) for f in e['figs']]})
         elif e['kind'] == 'cards':
-            items.append({'kind': 'cards', 'cards': [(t, [it for b in blocks for it in block_to_items(b)]) for t, blocks in e['cards']]})
+            items.append({'kind': 'cards', 'cards': [(t, blocks_items(blocks)) for t, blocks in e['cards']]})
         elif e['kind'] == 'image':
             items.append({'kind': 'image', 'url': e['url'], 'w': e['w'], 'h': e['h'], 'alt': e['alt'], 'x': e['x'], 'y': e['y']})
         elif e['kind'] == 'note':
@@ -1378,6 +1403,24 @@ def dedupe_within_chapter(body):
     return out
 
 
+def blocks_items(blocks):
+    """block_to_items voor een reeks blokken; een blok zonder witregel of alinea-afstand na het vorige blok in
+    hetzelfde tekstvak ('tight') wordt een nieuwe regel in dezelfde alinea, zoals op de dia."""
+    out = []
+    for b in blocks:
+        its = block_to_items(b)
+        if b.get('tight') and out and out[-1][0] == 'p' and its and its[0][0] == 'p':
+            k, runs, tag = out[-1]
+            out[-1] = (k, list(runs) + [('\u2028', False)] + list(its[0][1]), tag)
+            its = its[1:]
+        out.extend(its)
+    return out
+
+
+def num_label(label):
+    return re.match(r'^\s*(?:H|hoofdstuk)\s*\d+\b', label or '', re.I) is not None
+
+
 def build_document(course):
     chapters = []
     n = 0
@@ -1386,6 +1429,22 @@ def build_document(course):
     for ch in course.chapters():
         body = []
         title = ch['label']
+        divider = course.divider_title(ch['ids'][0]) if ch['ids'] else ''
+        # Scènes waar een menudia van dit hoofdstuk naartoe springt (bv. Oefenen -> Casus 1..4)
+        jumps = set()
+        menu_words = set()
+        intro = []
+        for sid in ch['ids']:
+            if course.skippable(sid) and course.slides.get(sid):
+                raw = json.dumps(course.slides[sid])
+                jumps |= {m.split('.')[0] for m in re.findall(r'"_player\.([A-Za-z0-9]+\.[A-Za-z0-9]+)"', raw)}
+                for it in course.flatten(course.slides[sid]['slideLayers'][0]):
+                    menu_words |= {norm(b['text']).lower() for b in course.text_blocks(it['ob']) or []}
+                # inleidende zin op de menudia ('In dit hoofdstuk ga je aan de slag ...'); knopinstructies niet
+                for it in course.flatten(course.slides[sid]['slideLayers'][0]):
+                    for b in course.text_blocks(it['ob']) or []:
+                        if re.match(r'^\s*In dit hoofdstuk\b', b['text']):
+                            intro.append({'kind': 'p', 'runs': [(norm(b['text']), False)]})
         first_heading = ''
         first_meta_title = ''
         last_h2 = None
@@ -1422,10 +1481,12 @@ def build_document(course):
                         last_h2 = stripped
             body.extend(i for i in items if i['kind'] != 'skip')
         text_len = sum(len(i.get('text', '')) + sum(len(r[0]) for r in i.get('runs', [])) for i in body)
-        if not body or (text_len < 300 and re.search(r'kies een hoofdstuk', ' '.join(i.get('text', '') for i in body), re.I)):
+        if (not body and not (jumps and num_label(ch['label']))) or (text_len < 300 and re.search(r'kies een hoofdstuk', ' '.join(i.get('text', '') for i in body), re.I)):
             continue
         if re.match(r'^(keuzemenu|menu|hoofdmenu)$', title, re.I):
             continue
+        if divider:
+            title = divider  # titel zoals de deelnemer hem op de hoofdstukdia ziet
         title = re.sub(r'^H\s*\d+\s*[:.\-–]?\s*', '', title).strip()
         title = re.sub(r'\s+\d+$', '', title).strip()
         if not title or re.match(r'^hoofdstuk$', title, re.I):
@@ -1450,13 +1511,40 @@ def build_document(course):
         if chapters and title and chapters[-1]['title'].lower() == title.lower():
             chapters[-1]['items'] = dedupe_within_chapter(chapters[-1]['items'] + body)
             chapters[-1]['slides'] += len(ch['ids'])
+            chapters[-1]['scenes'].append(ch.get('scene'))
+            chapters[-1].setdefault('labels', []).append(ch['label'])
             continue
         n += 1
         m = re.match(r'^\s*(?:H|hoofdstuk)\s*(\d+)\b', ch['label'], re.I)
         num = int(m.group(1)) if m else None  # nummer zoals in het spelermenu; Inleiding/Samenvatting/Casus zonder nummer
         if not title:
             title = 'Hoofdstuk %d' % num if num else 'Hoofdstuk'
-        chapters.append({'n': n, 'num': num, 'title': title, 'items': body, 'slides': len(ch['ids'])})
+        chapters.append({'n': n, 'num': num, 'title': title, 'items': body, 'slides': len(ch['ids']),
+                         'scenes': [ch.get('scene')], 'jumps': jumps, 'intro': intro, 'menu_words': menu_words,
+                         'labels': [ch['label']]})
+    # Een genummerd hoofdstuk dat alleen een menu is naar losse scènes (H5 Oefenen -> Casus 1..4):
+    # die scènes horen in Storyline bij dat hoofdstuk, dus daar onder plaatsen.
+    for host in chapters:
+        if host['num'] is None:
+            continue
+        own = {sc for sc in host['scenes'] if sc}
+        # alleen scènes met een eigen knop op het menu ('Casus 1'); 'Volgende' naar de Samenvatting telt niet
+        guests = [c for c in chapters if c is not host and c['num'] is None and c['scenes'] and
+                  all(sc in host['jumps'] and sc not in own for sc in c['scenes'] if sc) and
+                  all(lb.lower() in host.get('menu_words', set()) for lb in c.get('labels', []))]
+        if not guests:
+            continue
+        for g in guests:
+            if not any(it['kind'] == 'h2' for it in g['items'][:1]):
+                g['items'] = [{'kind': 'h2', 'text': g['title']}] + g['items']
+            host['items'] = host['items'] + g['items']
+            host['slides'] += g['slides']
+        host['items'] = host.get('intro', []) + host['items']
+        chapters = [c for c in chapters if not any(c is g for g in guests)]
+    for i, c in enumerate(chapters, 1):
+        c['n'] = i
+        for k in ('jumps', 'intro', 'menu_words', 'labels', 'scenes'):
+            c.pop(k, None)
     return chapters
 
 
