@@ -563,16 +563,9 @@
     const M = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
     const d = new Date();
     const p2 = (n) => String(n).padStart(2, '0');
-    const ver = String(version || '').replace(/^\s*versie\s*/i, '').trim();
-    const meta = 'Geëxporteerd op ' + d.getDate() + ' ' + M[d.getMonth()] + ' ' + d.getFullYear() + ' om ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) +
-      (ver ? ' &middot; bronversie: ' + H.esc(ver) : '');
-    return '<aside class="provenance"><p class="pv-head">Over dit document</p>' +
-      '<p>Dit document bevat de inhoud van de e-module <em>' + H.esc(title) + '</em> van NIPV, letterlijk en zonder inhoudelijke ' +
-      'wijzigingen overgenomen door Oefio. Alleen de vormgeving is aangepast voor lezen en printen: vragen en ' +
-      'opdrachten staan erin met het juiste antwoord, knoppen en navigatie zijn weggelaten.</p>' +
-      '<p class="pv-meta">' + meta + '</p>' +
-      '<p>Is de e-module inmiddels gewijzigd? Laat het ons weten via <strong>support@oefio.nl</strong>, ' +
-      'dan werken we dit document bij.</p></aside>';
+    const stamp = d.getDate() + ' ' + M[d.getMonth()] + ' ' + d.getFullYear() + ' om ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+    return '<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>' + H.esc(title) + '</em>, gemaakt door Oefio op ' + stamp + '. ' +
+      'Is de e-module bijgewerkt? Mail <strong>support@oefio.nl</strong>, dan maken we een nieuwe versie.</p></aside>';
   };
 
 

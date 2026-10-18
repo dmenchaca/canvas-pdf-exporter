@@ -400,21 +400,15 @@ MAANDEN = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augu
 
 
 def provenance_html(title, version='', when=None):
-    """Herkomstvermelding voor de voorpagina: letterlijk overgenomen van NIPV door Oefio, met exportmoment.
+    """Korte herkomstvermelding voor de voorpagina (bron, maker, exportmoment, contact bij updates).
     Dezelfde tekst staat in rise.js en storyline.js (H.provenanceHtml / S.provenanceHtml)."""
     import datetime
     from html import escape
     when = when or datetime.datetime.now()
     stamp = '%d %s %d om %02d:%02d' % (when.day, MAANDEN[when.month - 1], when.year, when.hour, when.minute)
-    ver = re.sub(r'^\s*versie\s*', '', version or '', flags=re.I).strip()
-    meta = 'Geëxporteerd op %s' % stamp + (' &middot; bronversie: %s' % escape(ver) if ver else '')
-    return ('<aside class="provenance"><p class="pv-head">Over dit document</p>'
-            '<p>Dit document bevat de inhoud van de e-module <em>%s</em> van NIPV, letterlijk en zonder inhoudelijke '
-            'wijzigingen overgenomen door Oefio. Alleen de vormgeving is aangepast voor lezen en printen: vragen en '
-            'opdrachten staan erin met het juiste antwoord, knoppen en navigatie zijn weggelaten.</p>'
-            '<p class="pv-meta">%s</p>'
-            '<p>Is de e-module inmiddels gewijzigd? Laat het ons weten via <strong>support@oefio.nl</strong>, '
-            'dan werken we dit document bij.</p></aside>') % (escape(title), meta)
+    return ('<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>%s</em>, gemaakt door Oefio op %s. '
+            'Is de e-module bijgewerkt? Mail <strong>support@oefio.nl</strong>, dan maken we een nieuwe versie.</p>'
+            '</aside>') % (escape(title), stamp)
 
 
 _OPT_SEQ = 0
