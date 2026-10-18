@@ -1961,6 +1961,8 @@ def rise_css():
     spec = importlib.util.spec_from_file_location('book_to_print', os.path.join(here, 'book-to-print.py'))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    global _B2P
+    _B2P = mod
     return mod.CSS
 
 
@@ -2140,12 +2142,22 @@ def h_item(it):
     return ''
 
 
+_B2P = None
+
+
+def provenance_html(title, version):
+    """Herkomstvermelding uit book-to-print.py (zelfde tekst als bij Rise)."""
+    if _B2P is None:
+        rise_css()
+    return _B2P.provenance_html(title, version)
+
+
 def render_html(chapters, title, version=''):
     _OPT_SEQ[0] = 0
     toc = ''.join('<li><span class="tn">%s</span>%s</li>' % (('%d.' % ch['num']) if ch.get('num') else '', esc(ch['title'])) for ch in chapters)
     ver = '<p class="cover-version">%s</p>' % esc(version) if version else ''
     cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>%s'
-             '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div></section>') % (esc(title), ver, toc)
+             '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div>%s</section>') % (esc(title), ver, toc, provenance_html(title, version))
     secs = []
     for ch in chapters:
         parts, its, done = [], ch['items'], set()

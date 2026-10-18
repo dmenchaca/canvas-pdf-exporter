@@ -31,6 +31,13 @@ th { background: #eef2f5; }
 .cover .cover-kicker { font-size: 11pt; color: #bc1413; margin-bottom: .8em; }
 .cover h1 { font-size: 28pt; line-height: 1.15; margin: 0 0 .6em; letter-spacing: -.01em; text-wrap: balance; }
 .cover .toc { margin-top: 3em; }
+/* Herkomstvermelding op de voorpagina (info-stijl) */
+.cover .provenance { margin-top: 2.6em; padding: .85em 1.1em .85em 3.1em; position: relative; background: #eef5fb; border: 1px solid #c6dcee; border-radius: 6px; font-size: 9pt; line-height: 1.45; color: #23384a; break-inside: avoid; }
+.cover .provenance::before { content: "i"; position: absolute; left: 1.05em; top: .95em; width: 1.35em; height: 1.35em; border-radius: 50%; background: #2f6fa3; color: #fff; font: 700 8.5pt/1.35em Georgia, serif; text-align: center; font-style: italic; }
+.cover .provenance p { margin: 0 0 .45em; }
+.cover .provenance p:last-child { margin-bottom: 0; }
+.cover .provenance .pv-head { font-size: 8pt; text-transform: uppercase; letter-spacing: .08em; color: #2f6fa3; font-weight: 700; }
+.cover .provenance .pv-meta { color: #4a6278; }
 .cover .toc h2 { font-size: 10pt; text-transform: uppercase; letter-spacing: .08em; color: #555; margin: 0 0 .6em; }
 .cover .toc ol { margin: 0; padding-left: 1.4em; font-size: 12pt; line-height: 1.7; }
 
@@ -668,6 +675,24 @@ function riseInstallHelpers() {
   // ---- Omzetting van Rise-blokken naar schone, printbare HTML (port van book-to-print.py) ----
   H.esc = (t) => String(t || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+  // Herkomstvermelding op de voorpagina; zelfde tekst als provenance_html in book-to-print.py.
+  H.provenanceHtml = function (title, version) {
+    const M = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+    const d = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    const ver = String(version || '').replace(/^\s*versie\s*/i, '').trim();
+    const meta = 'Geëxporteerd op ' + d.getDate() + ' ' + M[d.getMonth()] + ' ' + d.getFullYear() + ' om ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) +
+      (ver ? ' &middot; bronversie: ' + H.esc(ver) : '');
+    return '<aside class="provenance"><p class="pv-head">Over dit document</p>' +
+      '<p>Dit document bevat de inhoud van de e-module <em>' + H.esc(title) + '</em> van NIPV, letterlijk en zonder inhoudelijke ' +
+      'wijzigingen overgenomen door Oefio. Alleen de vormgeving is aangepast voor lezen en printen: vragen en ' +
+      'opdrachten staan erin met het juiste antwoord, knoppen en navigatie zijn weggelaten.</p>' +
+      '<p class="pv-meta">' + meta + '</p>' +
+      '<p>Is de e-module inmiddels gewijzigd? Laat het ons weten via <strong>support@oefio.nl</strong>, ' +
+      'dan werken we dit document bij.</p></aside>';
+  };
+
+
   // Rijke inhoud (p, strong, ul, table...) van een .fr-view, opgeschoond.
   H.cleanRich = function (node) {
     if (!node) return '';
@@ -970,7 +995,7 @@ function riseInstallHelpers() {
       joined = joined.replace(/<h2 class="band">\s*Vraag\s*<\/h2>\s*(?=<div class="quiz">)/g, '');
       sections.push('<section class="chapter"><div class="chapter-header"><p class="kicker">Hoofdstuk ' + (idx + 1) + '</p><h1>' + H.esc(chTitle) + '</h1></div>' + joined + '</section>');
     });
-    const cover = '<section class="cover"><p class="cover-kicker">E-module</p><h1>' + H.esc(title) + '</h1><div class="toc"><h2>Inhoud</h2><ol>' + toc.join('') + '</ol></div></section>';
+    const cover = '<section class="cover"><p class="cover-kicker">E-module</p><h1>' + H.esc(title) + '</h1><div class="toc"><h2>Inhoud</h2><ol>' + toc.join('') + '</ol></div>' + H.provenanceHtml(title) + '</section>';
     const pageCss = (o.pageNumbers ? css : css.replace(/@page \{ @bottom-left[^\n]*\n/, ''))
       .replace('__CPE_TITLE__', title.replace(/\\/g, '\\\\').replace(/"/g, '\\"'));
     const inner = cover + '\n' + sections.join('\n');
