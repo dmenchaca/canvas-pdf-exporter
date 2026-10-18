@@ -406,7 +406,7 @@ def provenance_html(title, version='', when=None):
     from html import escape
     when = when or datetime.datetime.now()
     stamp = '%d %s %d om %02d:%02d' % (when.day, MAANDEN[when.month - 1], when.year, when.hour, when.minute)
-    return ('<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>%s</em>, gemaakt door Oefio op %s. '
+    return ('<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>%s</em>, gemaakt op %s. '
             'Is de e-module bijgewerkt? Mail support@oefio.nl, dan maken we een nieuwe versie.</p>'
             '</aside>') % (escape(title), stamp)
 
