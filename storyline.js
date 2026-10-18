@@ -20,7 +20,7 @@ function storylineInstallHelpers() {
     const p2 = (n) => String(n).padStart(2, '0');
     const stamp = d.getDate() + ' ' + M[d.getMonth()] + ' ' + d.getFullYear() + ' om ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
     return '<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>' + S.esc(title) + '</em>, gemaakt door Oefio op ' + stamp + '. ' +
-      'Is de e-module bijgewerkt? Mail <strong>support@oefio.nl</strong>, dan maken we een nieuwe versie.</p></aside>';
+      'Is de e-module bijgewerkt? Mail support@oefio.nl, dan maken we een nieuwe versie.</p></aside>';
   };
 
   S.norm = (t) => String(t || '').replace(/\s+/g, ' ').trim();
