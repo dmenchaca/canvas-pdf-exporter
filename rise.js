@@ -682,7 +682,7 @@ function riseInstallHelpers() {
     const p2 = (n) => String(n).padStart(2, '0');
     const stamp = d.getDate() + ' ' + M[d.getMonth()] + ' ' + d.getFullYear() + ' om ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
     return '<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>' + H.esc(title) + '</em>, gemaakt op ' + stamp + '. ' +
-      'Is de e-module bijgewerkt? Mail support@oefio.nl, dan maken we een nieuwe versie.</p></aside>';
+      'Is de e-module gewijzigd? Neem dan contact op via support@oefio.nl, zodat deze PDF kan worden bijgewerkt.</p></aside>';
   };
 
 
