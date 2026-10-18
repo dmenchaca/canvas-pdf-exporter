@@ -303,6 +303,19 @@ class Course:
                         seen.add(t)
                         text_count[t] += 1
         self.text_count = text_count
+        # Afbeelding die op (bijna) elke dia op dezelfde plek terugkomt (logo/icoon van de cursus): decoratie.
+        img_count = Counter()
+        for sid in self.order:
+            sl = self.slides.get(sid)
+            if not sl or not sl.get('slideLayers'):
+                continue
+            seen = set()
+            for it in self.flatten(sl['slideLayers'][0]):
+                u = self.image_url(it['ob'])
+                if u and u not in seen:
+                    seen.add(u)
+                    img_count[(u, round(it['x'] / 20), round(it['y'] / 20))] += 1
+        self.repeated_images = {k[0] for k, v in img_count.items() if v >= 3 and v >= 0.4 * self.slide_count}
 
     def layer_signature(self, L):
         items = self.flatten(L)
@@ -383,6 +396,8 @@ class Course:
                     entries.append(dict(base, kind='input', w=ob.get('width') or 0, h=ob.get('height') or 0))
                     continue
                 url = self.image_url(ob)
+                if url and url in self.repeated_images:
+                    url = ''  # logo/icoon dat op elke dia staat
                 if url and self.decorative(ob, url) and not self.decorative(ob, url, ignore_size=True) \
                         and self.images.get(url) and ('img:' + url) not in seen:
                     # Klein plaatje: alleen houden als er een onderschrift onder staat (thumbnailrij), zie structure_entries.
@@ -2133,7 +2148,13 @@ def h_item(it):
         cls = 'wide' if it['w'] > it['h'] * 1.6 else ''
         return '<figure class="%s"><img src="%s" alt="%s"></figure>' % (cls, it['data'], esc(it.get('alt', '')))
     if k == 'gallery':
-        figs = ''.join('<figure><img src="%s" alt="%s"></figure>' % (im['data'], esc(im.get('alt', ''))) for im in it['images'] if im.get('data'))
+        ims = [im for im in it['images'] if im.get('data')]
+        wmax = max((im.get('w') or 0 for im in ims), default=0)
+        def _full(im):
+            # groot beeld naast een duidelijk kleiner beeld (tabel naast een tekening): eigen volle rij, anders onleesbaar klein
+            w = im.get('w') or 0
+            return len(ims) > 1 and w >= 700 and w == wmax and any((o.get("w") or 0) <= 0.85 * w for o in ims if o is not im)
+        figs = ''.join('<figure%s><img src="%s" alt="%s"></figure>' % (' class="full"' if _full(im) else '', im['data'], esc(im.get('alt', ''))) for im in ims)
         return '<div class="gallery">%s</div>' % figs if figs else ''
     if k == 'quiz':
         return h_quiz(it)
@@ -2227,7 +2248,7 @@ def render_html(chapters, title, version=''):
             '\n.sl .quiz .answer p + p { display: block; margin: .5em 0 0; }'
             '\n.popup.untitled { border: none; border-left: 3px solid #14324f; background: #f4f6f8; }'
             '\n.popup.untitled .pu-body { padding: .55em 1em .6em; }')
-    css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
+    css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.gallery figure.full { flex: 1 1 100%; }\n.gallery:has(figure.full) { break-inside: auto; }\n.gallery figure { break-inside: avoid; }\n.gallery figure.full img { max-height: 95mm; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
     return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
             '<body class="forms sl">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
 
