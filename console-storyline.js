@@ -7,6 +7,24 @@
   (function () {
   const S = {};
   S.esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  // Herkomstvermelding op de voorpagina; zelfde tekst als provenance_html in book-to-print.py.
+  S.provenanceHtml = function (title, version) {
+    const M = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+    const d = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    const ver = String(version || '').replace(/^\s*versie\s*/i, '').trim();
+    const meta = 'Geëxporteerd op ' + d.getDate() + ' ' + M[d.getMonth()] + ' ' + d.getFullYear() + ' om ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) +
+      (ver ? ' &middot; bronversie: ' + S.esc(ver) : '');
+    return '<aside class="provenance"><p class="pv-head">Over dit document</p>' +
+      '<p>Dit document bevat de inhoud van de e-module <em>' + S.esc(title) + '</em> van NIPV, letterlijk en zonder inhoudelijke ' +
+      'wijzigingen overgenomen door Oefio. Alleen de vormgeving is aangepast voor lezen en printen: vragen en ' +
+      'opdrachten staan erin met het juiste antwoord, knoppen en navigatie zijn weggelaten.</p>' +
+      '<p class="pv-meta">' + meta + '</p>' +
+      '<p>Is de e-module inmiddels gewijzigd? Laat het ons weten via <strong>support@oefio.nl</strong>, ' +
+      'dan werken we dit document bij.</p></aside>';
+  };
+
   S.norm = (t) => String(t || '').replace(/\s+/g, ' ').trim();
   // Menulabels bevatten soms HTML-entiteiten (&apos;, &amp;): eerst decoderen, daarna weer netjes escapen.
   S.decode = (t) => String(t || '').replace(/&apos;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
@@ -583,7 +601,7 @@
       report.push({ i: n, title, slides: ch.ids.length, text: S.norm(text).length });
     });
     const title = st.title || 'Cursus';
-    const cover = '<section class="cover"><p class="cover-kicker">E-module</p><h1>' + S.esc(title) + '</h1><div class="toc"><h2>Inhoud</h2><ol>' + toc.join('') + '</ol></div></section>';
+    const cover = '<section class="cover"><p class="cover-kicker">E-module</p><h1>' + S.esc(title) + '</h1><div class="toc"><h2>Inhoud</h2><ol>' + toc.join('') + '</ol></div>' + S.provenanceHtml(title) + '</section>';
     const pageCss = o.pageNumbers ? css : css.replace(/@page \{ @bottom-right[^\n]*\n/, '');
     const inner = cover + '\n' + sections.join('\n');
     const html = '<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>' + S.esc(title) + '</title><style>' + pageCss + '</style></head><body class="forms sl">' + inner + '</body></html>';
