@@ -407,7 +407,7 @@ def provenance_html(title, version='', when=None):
     when = when or datetime.datetime.now()
     stamp = '%d %s %d om %02d:%02d' % (when.day, MAANDEN[when.month - 1], when.year, when.hour, when.minute)
     return ('<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>%s</em>, gemaakt op %s. '
-            'Is de e-module bijgewerkt? Mail support@oefio.nl, dan maken we een nieuwe versie.</p>'
+            'Is de e-module gewijzigd? Neem dan contact op via support@oefio.nl, zodat deze PDF kan worden bijgewerkt.</p>'
             '</aside>') % (escape(title), stamp)
 
 
