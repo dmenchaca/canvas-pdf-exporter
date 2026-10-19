@@ -188,7 +188,7 @@ class Course:
         links = {}
         for ev in ob.get('events') or []:
             for ac in ev.get('actions') or []:
-                if ac.get('kind') == 'open_url' and ac.get('url') and ev.get('triggerid'):
+                if ac.get('kind') == 'open_url' and ac.get('url') and ev.get('triggerid') and not re.fullmatch(r'[0-]+', ev['triggerid']):
                     links[ev['triggerid']] = ac['url'].strip()
         base = ((vt.get('defaultBlockStyle') or {}).get('baseSpanStyle') or {}).get('fontSize') or 0
         blocks = []
@@ -209,7 +209,7 @@ class Course:
                               'bold': not body_bold_variant and (bool(st.get('fontIsBold')) or bool(re.search(r'bold|black|heavy', fam, re.I))),
                               'attr_bold': bool(st.get('fontIsBold')),  # voor structuur (kopherkenning) ongewijzigd
                               'size': st.get('fontSize') or base,
-                              'url': links.get(st.get('linkId')) if st.get('linkId') else None,
+                              'url': links.get(st.get('linkId')) if st.get('linkId') and not re.fullmatch(r'[0-]+', st.get('linkId')) else None,
                               'underline': bool(st.get('fontIsUnderline'))})
             text = ''.join(s['text'] for s in spans)
             style = b.get('style') or {}
@@ -495,17 +495,43 @@ class Course:
                                     all_bold=all(s.get('attr_bold', s['bold']) for b in blocks for s in b['spans'] if norm(s['text'])),
                                     w=ob.get('width') or 0, h=ob.get('height') or 0))
         # Klikvlak over tekst ('klik hier'): de onderstreepte of 'hier'-woorden onder het vlak krijgen de link.
-        for (li, hx, hy, hw, hh, url) in hotspots:
-            for e in entries:
-                if e['kind'] != 'text' or e['layer'] != li:
-                    continue
-                ex, ey, ew, eh = e['x'], e['y'], e.get('w') or 0, e.get('h') or 0
-                if hx > ex + ew or hx + hw < ex or hy > ey + eh or hy + hh < ey:
-                    continue
-                cand = [sp for b in e['blocks'] for sp in b['spans'] if not sp.get('url') and norm(sp['text'])
-                        and (sp.get('underline') or re.fullmatch(r'\s*(hier|deze|video|klik hier|link)\s*[.:]?\s*', sp['text'], re.I))]
-                for sp in cand:
-                    sp['url'] = url
+        # Meerdere klikvlakken over één tekstvak (bronnenlijst) worden op volgorde van boven naar beneden gekoppeld.
+        for e in entries:
+            if e['kind'] != 'text':
+                continue
+            ex, ey, ew, eh = e['x'], e['y'], e.get('w') or 0, e.get('h') or 0
+            hs = sorted([h for h in hotspots if h[0] == e['layer'] and not (h[1] > ex + ew or h[1] + h[3] < ex or h[2] > ey + eh or h[2] + h[4] < ey)],
+                        key=lambda h: h[2])
+            if not hs:
+                continue
+            spans = [sp for b in e['blocks'] for sp in b['spans']]
+            total = sum(len(sp['text']) for sp in spans) or 1
+            pos, acc = {}, 0
+            for sp in spans:
+                pos[id(sp)] = (acc + len(sp['text']) / 2) / total
+                acc += len(sp['text'])
+            cand = [sp for sp in spans if not sp.get('url') and norm(sp['text'])
+                    and (sp.get('underline') or re.fullmatch(r'\s*(hier|deze|video|klik hier|link)\s*[.:]?\s*', sp['text'], re.I))]
+            # aaneengesloten onderstreepte spans (één titel over meerdere spans) als één kandidaat
+            groups = []
+            for sp in cand:
+                if groups and spans.index(sp) == spans.index(groups[-1][-1]) + 1 and not re.search(r'[\r\n]\s*$', groups[-1][-1]['text']):
+                    groups[-1].append(sp)
+                else:
+                    groups.append([sp])
+            if not groups:
+                continue
+            if len(hs) == len(groups):
+                pairs = list(zip(hs, groups))
+            elif len(hs) == 1:
+                frac = (hs[0][2] + hs[0][4] / 2 - ey) / max(eh, 1)
+                g = min(groups, key=lambda g: abs(pos[id(g[0])] - frac))
+                pairs = [(hs[0], g)] if len(groups) == 1 or abs(pos[id(g[0])] - frac) <= 0.35 else []
+            else:
+                pairs = []  # niet eenduidig: liever geen link dan een verkeerde
+            for h, g in pairs:
+                for sp in g:
+                    sp['url'] = h[5]
         # Stapnummers: bolletjes links naast een tekstvak horen bij de alinea's in dat vak (1 bolletje per alinea).
         for e in entries:
             if e['kind'] != 'text' or not badges:
@@ -1350,6 +1376,17 @@ def merge_broken_paragraphs(items):
     return out
 
 
+def _url_of(e):
+    """Externe link van een tekstvak dat als kop wordt getoond (alleen als het hele vak één link heeft)."""
+    us = {sp.get('url') for b in e.get('blocks') or [] for sp in b['spans'] if norm(sp['text'])}
+    return next(iter(us)) if len(us) == 1 and None not in us else None
+
+
+def _link(it):
+    t = esc(it['text'])
+    return '<a href="%s">%s</a>' % (esc(it['url']).replace('"', '&quot;'), t) if it.get('url') else t
+
+
 def slide_model(course, sid, suppress_heading=False):
     entries, interactions, layer_ids = course.slide_entries(sid)
     if not entries:
@@ -1402,7 +1439,7 @@ def slide_model(course, sid, suppress_heading=False):
                 popup_ids.add(e)
 
     if heading is not None and not suppress_heading:
-        items.append({'kind': 'h2', 'text': norm(heading['text'])})
+        items.append({'kind': 'h2', 'text': norm(heading['text']), 'url': _url_of(heading)})
     quiz_placed = False
     has_solution = any(q.get('solution') for q in quizzes)
     biggest = max([e for e in entries if e['kind'] == 'image' and e['layer'] == 0], key=lambda e: (e.get('w') or 0) * (e.get('h') or 0), default=None)
@@ -1435,7 +1472,7 @@ def slide_model(course, sid, suppress_heading=False):
                 continue
             nxt = next((n for n in entries[entries.index(e) + 1:] if n['kind'] == 'text' and not n.get('is_choice')), None)
             if is_heading_like(e, slide_max, body_size) or is_label_before_body(e, nxt):
-                items.append({'kind': 'h3', 'text': norm(e['text'])})
+                items.append({'kind': 'h3', 'text': norm(e['text']), 'url': _url_of(e)})
                 continue
             for b in e['blocks']:
                 for kind, runs, tag in block_to_items(b):
@@ -2343,9 +2380,9 @@ def h_item(it):
         return ('<div class="image-aside"><div class="text">%s</div><figure><img src="%s" alt="%s">%s</figure></div>'
                 % (''.join(h_item(x) for x in it['items']), img['data'], esc(img.get('alt', '')), caps))
     if k == 'h2':
-        return '<h2 class="section">%s</h2>' % esc(it['text'])
+        return '<h2 class="section">%s</h2>' % _link(it)
     if k == 'h3':
-        return '<h3>%s</h3>' % esc(it['text'])
+        return '<h3>%s</h3>' % _link(it)
     if k == 'p':
         return '<div class="block"><p>%s</p></div>' % h_runs(it['runs'])
     if k == 'list':
