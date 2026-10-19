@@ -7,6 +7,16 @@
   (function () {
   const S = {};
   S.esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  // Herkomstvermelding op de voorpagina; zelfde tekst als provenance_html in book-to-print.py.
+  S.provenanceHtml = function (title, version) {
+    const M = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+    const d = new Date();
+    const stamp = d.getDate() + ' ' + M[d.getMonth()] + ' ' + d.getFullYear();
+    return '<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>' + S.esc(title) + '</em>, gemaakt op ' + stamp + '. ' +
+      'Is de e-module gewijzigd? Neem dan contact op via support@oefio.nl, zodat deze PDF kan worden bijgewerkt.</p></aside>';
+  };
+
   S.norm = (t) => String(t || '').replace(/\s+/g, ' ').trim();
   // Menulabels bevatten soms HTML-entiteiten (&apos;, &amp;): eerst decoderen, daarna weer netjes escapen.
   S.decode = (t) => String(t || '').replace(/&apos;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
@@ -583,7 +593,7 @@
       report.push({ i: n, title, slides: ch.ids.length, text: S.norm(text).length });
     });
     const title = st.title || 'Cursus';
-    const cover = '<section class="cover"><p class="cover-kicker">E-module</p><h1>' + S.esc(title) + '</h1><div class="toc"><h2>Inhoud</h2><ol>' + toc.join('') + '</ol></div></section>';
+    const cover = '<section class="cover"><p class="cover-kicker">E-module</p><h1>' + S.esc(title) + '</h1><div class="toc"><h2>Inhoud</h2><ol>' + toc.join('') + '</ol></div>' + S.provenanceHtml(title) + '</section>';
     const pageCss = o.pageNumbers ? css : css.replace(/@page \{ @bottom-right[^\n]*\n/, '');
     const inner = cover + '\n' + sections.join('\n');
     const html = '<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>' + S.esc(title) + '</title><style>' + pageCss + '</style></head><body class="forms sl">' + inner + '</body></html>';
