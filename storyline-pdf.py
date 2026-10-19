@@ -2112,6 +2112,8 @@ def rise_css():
     spec = importlib.util.spec_from_file_location('book_to_print', os.path.join(here, 'book-to-print.py'))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    global _B2P
+    _B2P = mod
     return mod.CSS
 
 
@@ -2346,32 +2348,42 @@ def h_item(it):
 
 
 COMPACT_CSS = '''
-@page { margin: 14mm 16mm 16mm; }
-body.compact { font-size: 9.6pt; line-height: 1.42; }
-.compact .cover { min-height: 0; break-after: auto; display: block; padding: 0 0 4mm; margin: 0 0 6mm; border-bottom: 1px solid #ccc; }
-.compact .cover h1 { font-size: 19pt; margin: 0 0 .25em; }
-.compact .cover .cover-kicker { margin-bottom: .3em; }
+@page { margin: 16mm 18mm 18mm; }
+body.compact { font-size: 9.8pt; line-height: 1.45; }
+.compact .cover { min-height: 0; break-after: auto; display: block; padding: 0; margin: 0 0 9mm; }
+.compact .cover .cover-kicker { font-size: 8.5pt; letter-spacing: .08em; text-transform: uppercase; color: #bc1413; margin: 0 0 .5em; }
+.compact .cover h1 { font-size: 21pt; line-height: 1.15; margin: 0 0 .35em; letter-spacing: -.01em; }
+.compact .cover .cover-version { font-size: 9pt; color: #666; margin: 0; }
 .compact .cover .toc { display: none; }
-.compact .cover .provenance { margin-top: 1em; }
+.compact .cover .provenance { margin: 0 0 6mm; }
 .compact .chapter { break-before: auto; }
-.compact h2.section { font-size: 12.5pt; margin: 1.3em 0 .45em; padding-top: .5em; border-top: 1px solid #e3e3e3; }
-.compact .cover + .chapter > h2.section:first-child { border-top: 0; padding-top: 0; margin-top: .2em; }
-.compact h3, .compact .lblsec h3 { font-size: 10.5pt; margin: .9em 0 .25em; color: #1d3a5c; }
+.compact h2.section { font-size: 13pt; margin: 2.1em 0 .5em; padding: 0; border: 0; }
+.compact .chapter > h2.section:first-child { margin-top: 0; }
+.compact h3, .compact .lblsec h3 { font-size: 10.6pt; margin: 1.1em 0 .25em; color: #1d3a5c; }
 .compact .lblsec { break-inside: avoid-page; }
-.compact .block { margin: 0 0 .55em; }
+.compact .block { margin: 0 0 .6em; }
 .compact p { margin: 0 0 .45em; }
-.compact figure img, .compact .gallery figure img { max-height: 48mm; }
+.compact figure img, .compact .gallery figure img { max-height: 42mm; }
 .compact .gallery figure.full img { max-height: 80mm; }
 .compact .image-aside figure img { max-height: 50mm; }
-.compact .popup { margin: .5em 0 .8em; padding: .5em .8em; }
+.compact .popup { margin: .6em 0 .9em; padding: .5em .8em; }
 .compact .popup figure.pu-img img { max-height: 30mm; }
 .compact .popup, .compact .keep-pair, .compact .gallery { break-inside: auto; }
 .compact .popup .pu-head { break-after: avoid; }
-.compact figure, .compact .gallery figure img { break-inside: avoid; }
-.compact figure img { max-height: 42mm; }
-.compact table.imgtable { font-size: 8.3pt; margin: .3em 0 .8em; }
+.compact figure { break-inside: avoid; }
+.compact table.imgtable { font-size: 8.3pt; margin: .3em 0 .9em; }
 .compact table.imgtable td { padding: .22em .45em; }
 '''
+
+
+_B2P = None
+
+
+def provenance_html(title, version):
+    """Herkomstvermelding uit book-to-print.py (zelfde tekst als bij Rise)."""
+    if _B2P is None:
+        rise_css()
+    return _B2P.provenance_html(title, version)
 
 
 def render_html(chapters, title, version=''):
@@ -2379,7 +2391,10 @@ def render_html(chapters, title, version=''):
     toc = ''.join('<li><span class="tn">%s</span>%s</li>' % (('%d.' % ch['num']) if ch.get('num') else '', esc(ch['title'])) for ch in chapters)
     ver = '<p class="cover-version">%s</p>' % esc(version) if version else ''
     cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>%s'
-             '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div></section>') % (esc(title), ver, toc)
+             '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div>%s</section>') % (esc(title), ver, toc, provenance_html(title, version))
+    if COMPACT[0]:  # info-kader bovenaan, dan de titel
+        cover = '<section class="cover">%s<p class="cover-kicker">Instructeurskaart</p><h1>%s</h1>%s</section>' % (
+            provenance_html(title, version), esc(title), ver)
     secs = []
     for ch in chapters:
         parts, its, done = [], ch['items'], set()
@@ -2530,6 +2545,26 @@ def main():
                     rest = [x for x in ch['items'][i + 1:] if x['kind'] in ('p', 'caption', 'note', 'list')]
                     ch['items'] = ch['items'][:i] + [dict(x, kind='caption', text=item_text(x)) for x in rest]
                     break
+        # KOPPEN IN HOOFDLETTERS -> gewone zinsopbouw; afkortingen die in de lopende tekst ook in hoofdletters staan blijven
+        body_txt = ' '.join(item_text(it) for ch in chapters for it in ch['items'] if it['kind'] in ('p', 'list', 'labelrows', 'popup', 'cards'))
+        acr = {w for w in re.findall(r'\b[A-Z][A-Z0-9]{1,6}\b', body_txt)}
+        def _sc(t):
+            if not t or t != t.upper() or not re.search(r'[A-Z]{3}', t):
+                return t
+            words = t.split(' ')
+            out = [w if re.sub(r'\W', '', w) in acr else w.lower() for w in words]
+            first = next((i for i, w in enumerate(out) if re.search(r'[a-z]', w)), None)
+            if first is not None and out[first] == words[first].lower():
+                out[first] = out[first][:1].upper() + out[first][1:]
+            return ' '.join(out)
+        for ch in chapters:
+            for it in ch['items']:
+                if it['kind'] in ('h2', 'h3'):
+                    it['text'] = _sc(it['text'])
+                elif it['kind'] == 'popup':
+                    it['title'] = _sc(it.get('title') or '')
+                elif it['kind'] == 'labelrows':
+                    it['rows'] = [(_sc(l), v) for l, v in it['rows']]
     for ch in chapters:
         for it in ch['items']:
             if it['kind'] == 'image':
