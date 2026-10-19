@@ -2235,6 +2235,7 @@ def h_cell(items):
 
 OMIT_LAYERS = set()  # uit <cursus>.fixes.json: laag-id's die nooit getoond worden (restant van een sjabloon)
 OMIT_TEXT = []  # uit <cursus>.fixes.json: teksten die op de dia niet zichtbaar zijn (verborgen restanten)
+DEDUPE_TITLES = [False]
 COMPACT = [False]  # --compact: instructiekaart-opmaak (dichter op elkaar, kopjes i.p.v. pijllabels)
 TABLES = {}  # afbeelding-url -> {'html': ...} uit <cursus>.tables.json (image-tables.py)
 
@@ -2533,7 +2534,8 @@ def main():
         # handmatige correcties per cursus: {"omit_text": ["exacte tekst van een verborgen tekstvak", ...]}
         fx = json.load(open(fpath, encoding='utf-8'))
         OMIT_TEXT.extend(norm(t) for t in fx.get('omit_text', []))
-        OMIT_LAYERS.update(fx.get('omit_layers', []))  # {"omit_layers": ["<laag-id>"]}
+        OMIT_LAYERS.update(fx.get('omit_layers', []))
+        DEDUPE_TITLES[0] = bool(fx.get('dedupe_popups_by_title'))  # {"omit_layers": ["<laag-id>"]}
     tpath = (a.dump[:-8] if a.dump.endswith('.sl.json') else a.dump) + '.tables.json'
     if os.path.exists(tpath):
         TABLES.update(json.load(open(tpath, encoding='utf-8')))
@@ -2632,8 +2634,8 @@ def main():
                     key = re.sub(r'^\d+\.\s*', '', it['title']).lower()
                     if key in first:
                         old = first[key]
-                        if body(it) in body(old):
-                            continue
+                        if body(it) in body(old) or DEDUPE_TITLES[0]:
+                            continue  # (fixes.json 'dedupe_popups_by_title': ook bij afwijkende tekst alleen de eerste)
                         if body(old) in body(it):
                             out[out.index(old)] = it
                             first[key] = it
