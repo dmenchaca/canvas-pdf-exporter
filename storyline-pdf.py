@@ -2525,7 +2525,9 @@ def main():
         for ch in chapters:
             for i, it in enumerate(ch['items']):
                 if it['kind'] in ('h2', 'h3', 'p') and re.match(r'^\s*einde (instructeurs|instructie)kaart', item_text(it), re.I):
-                    ch['items'] = ch['items'][:i]
+                    # alleen 'Einde …' en het logo weg; overige tekst (bv. 'Overal waar … hij staat, kan ook zij …') blijft
+                    rest = [x for x in ch['items'][i + 1:] if x['kind'] in ('p', 'caption', 'note', 'list')]
+                    ch['items'] = ch['items'][:i] + [dict(x, kind='caption', text=item_text(x)) for x in rest]
                     break
     for ch in chapters:
         for it in ch['items']:
