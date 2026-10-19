@@ -2592,6 +2592,94 @@ def main():
                 for v in o:
                     _fix(v)
         _fix(chapters)
+        # Uitwerkingen van stappen (pop-ups '9.' + 'Vervolgen borstcompressies'): nummer en titel samen als kop,
+        # afgebroken opsommingsregels weer heel, op stapvolgorde direct na het stappenplan en elk maar één keer.
+        def _txt(runs):
+            return ''.join(r[0] for r in runs)
+        for ch in chapters:
+            its = ch['items']
+            for it in its:
+                if it['kind'] != 'popup':
+                    continue
+                ps = it['items']
+                if not it.get('title') and len(ps) >= 2 and ps[0][0] == 'p' and re.fullmatch(r'\s*\d{1,2}\.?\s*', _txt(ps[0][1])) \
+                        and ps[1][0] == 'p' and len(_txt(ps[1][1]).strip()) <= 70:
+                    it['title'] = '%s. %s' % (_txt(ps[0][1]).strip().rstrip('.'), norm(_txt(ps[1][1])))
+                    ps = ps[2:]
+                elif not it.get('title') and ps and ps[0][0] == 'p':
+                    m = re.match(r'^\s*(\d{1,2})\.\s*\n?\s*(\S.{0,70})$', _txt(ps[0][1]).strip(), re.S)
+                    if m:
+                        it['title'] = '%s. %s' % (m.group(1), norm(m.group(2)))
+                        ps = ps[1:]
+                    elif len(ps) >= 2 and len(_txt(ps[0][1]).strip()) <= 70 and not re.search(r'[.!?:]\s*$', _txt(ps[0][1]).strip()):
+                        it['title'] = norm(_txt(ps[0][1]))  # korte eerste regel = titel van de uitleg
+                        ps = ps[1:]
+                merged = []
+                for kind, runs, tag in ps:
+                    t = _txt(runs).strip()
+                    if merged and kind == 'p' and t and merged[-1][0] == 'li' \
+                            and not re.search(r'[.!?:;]\s*$', _txt(merged[-1][1]).strip()) and (t[:1].islower() or t[:1].isdigit()):
+                        k0, r0, g0 = merged[-1]
+                        merged[-1] = (k0, list(r0) + [(' ' + t, False)], g0)
+                        continue
+                    merged.append((kind, runs, tag))
+                it['items'] = merged
+            # dubbele uitwerkingen: zelfde titel (zonder stapnummer) -> alleen weg als de tekst er volledig in zit
+            body = lambda x: re.sub(r'\W+', '', ' '.join(_txt(r) for _, r, _ in x['items'])).lower()
+            out, first = [], {}
+            for it in its:
+                if it['kind'] == 'popup' and it.get('title'):
+                    key = re.sub(r'^\d+\.\s*', '', it['title']).lower()
+                    if key in first:
+                        old = first[key]
+                        if body(it) in body(old):
+                            continue
+                        if body(old) in body(it):
+                            out[out.index(old)] = it
+                            first[key] = it
+                            continue
+                    else:
+                        first[key] = it
+                out.append(it)
+            # per dia (tussen twee h2's): stapuitwerkingen op stapvolgorde direct na het stappenplan, daarna 'Didactische tips'
+            def _stepkey(x, steps):
+                t = x.get('title') or ''
+                m = re.match(r'(\d+)\.', t)
+                if m:
+                    return int(m.group(1))
+                w = re.sub(r'\W', '', t.split(' ')[0].lower())[:6]   # 'Combinatie' ~ stap 8 'Combineer ...'
+                for n, st in steps:
+                    if w and re.sub(r'\W', '', st.split(' ')[0].lower())[:6][:5] == w[:5]:
+                        return n
+                return None
+            res, k = [], 0
+            while k < len(out):
+                hi = k + 1
+                while hi < len(out) and out[hi]['kind'] != 'h2':
+                    hi += 1
+                seg = out[k:hi]
+                steps = []
+                for y in seg:
+                    if y['kind'] == 'list' and y.get('tag') == 'ol':
+                        for n0, li in enumerate(y['items'], start=1):
+                            steps.append((li.get('start') or n0 if n0 == 1 else n0 + (y['items'][0].get('start') or 1) - 1,
+                                          ''.join(r[0] for r in li['runs']).strip()))
+                pops = [(y, _stepkey(y, steps)) for y in seg if y['kind'] == 'popup']
+                stepped = [y for y, n in sorted([p_ for p_ in pops if p_[1] is not None], key=lambda p_: p_[1])]
+                if len(stepped) >= 2:
+                    tips = next((y for y in seg if y['kind'] == 'h3' and re.match(r'^didactische tips$', y['text'], re.I)), None)
+                    rest = [y for y in seg if y not in stepped and y is not tips]
+                    last_list = max([n_ for n_, y in enumerate(rest) if y['kind'] in ('list', 'p', 'figcaps', 'image', 'gallery')] or [len(rest) - 1])
+                    # eerste niet-stap pop-up krijgt de 'Didactische tips'-kop erboven
+                    after = rest[:last_list + 1] + stepped
+                    tail = rest[last_list + 1:]
+                    if tips is not None:
+                        tail = [tips] + tail
+                    seg = after + tail
+                res.extend(seg)
+                k = hi
+            out = res
+            ch['items'] = out
     for ch in chapters:
         for it in ch['items']:
             if it['kind'] == 'image':
