@@ -184,6 +184,12 @@ class Course:
         if not item:
             return None
         vt = item['vartext']
+        # tekstlinks: span.style.linkId -> event 'onlinkrelease' met open_url op hetzelfde object
+        links = {}
+        for ev in ob.get('events') or []:
+            for ac in ev.get('actions') or []:
+                if ac.get('kind') == 'open_url' and ac.get('url') and ev.get('triggerid'):
+                    links[ev['triggerid']] = ac['url'].strip()
         base = ((vt.get('defaultBlockStyle') or {}).get('baseSpanStyle') or {}).get('fontSize') or 0
         blocks = []
         dstyle = vt.get('defaultBlockStyle') or {}
@@ -202,7 +208,9 @@ class Course:
                 spans.append({'text': decode(sp.get('text') or ''),
                               'bold': not body_bold_variant and (bool(st.get('fontIsBold')) or bool(re.search(r'bold|black|heavy', fam, re.I))),
                               'attr_bold': bool(st.get('fontIsBold')),  # voor structuur (kopherkenning) ongewijzigd
-                              'size': st.get('fontSize') or base})
+                              'size': st.get('fontSize') or base,
+                              'url': links.get(st.get('linkId')) if st.get('linkId') else None,
+                              'underline': bool(st.get('fontIsUnderline'))})
             text = ''.join(s['text'] for s in spans)
             style = b.get('style') or {}
             if not norm(text):
@@ -408,7 +416,16 @@ class Course:
         for inter in interactions:
             wrong_layers |= feedback_layers(inter)[1] - feedback_layers(inter)[0]
         badges = []
+        hotspots = []  # (laag, x, y, w, h, url): klikvlak met open_url boven tekst
         for li, L in enumerate(sl.get('slideLayers') or []):
+            for it in self.flatten(L):
+                ob = it['ob']
+                if self.text_blocks(ob):
+                    continue
+                for ev in ob.get('events') or []:
+                    for ac in ev.get('actions') or []:
+                        if ac.get('kind') == 'open_url' and ac.get('url') and ev.get('kind') in ('onrelease', 'onclick'):
+                            hotspots.append((li, it['x'], it['y'], ob.get('width') or 0, ob.get('height') or 0, ac['url'].strip()))
             layer_ids[li] = L.get('id')
             if self.is_chrome_layer(L) or self.is_tutorial_layer(L) or L.get('id') in wrong_layers or L.get('id') in OMIT_LAYERS:
                 continue
@@ -477,6 +494,18 @@ class Course:
                                     is_choice=full in choice_texts or full.lower() in choice_texts, acc=ob.get('accType'),
                                     all_bold=all(s.get('attr_bold', s['bold']) for b in blocks for s in b['spans'] if norm(s['text'])),
                                     w=ob.get('width') or 0, h=ob.get('height') or 0))
+        # Klikvlak over tekst ('klik hier'): de onderstreepte of 'hier'-woorden onder het vlak krijgen de link.
+        for (li, hx, hy, hw, hh, url) in hotspots:
+            for e in entries:
+                if e['kind'] != 'text' or e['layer'] != li:
+                    continue
+                ex, ey, ew, eh = e['x'], e['y'], e.get('w') or 0, e.get('h') or 0
+                if hx > ex + ew or hx + hw < ex or hy > ey + eh or hy + hh < ey:
+                    continue
+                cand = [sp for b in e['blocks'] for sp in b['spans'] if not sp.get('url') and norm(sp['text'])
+                        and (sp.get('underline') or re.fullmatch(r'\s*(hier|deze|video|klik hier|link)\s*[.:]?\s*', sp['text'], re.I))]
+                for sp in cand:
+                    sp['url'] = url
         # Stapnummers: bolletjes links naast een tekstvak horen bij de alinea's in dat vak (1 bolletje per alinea).
         for e in entries:
             if e['kind'] != 'text' or not badges:
@@ -918,8 +947,16 @@ def runs_of(blocks, keep_bold_all=False):
             all_bold = False
         for s in b['spans']:
             bold = s['bold'] and (not all_bold or keep_bold_all)
-            out.append((s['text'], bold))
+            out.append((s['text'], Link(bold, s['url']) if s.get('url') else bold))
     return out
+
+
+class Link(int):
+    """Vet-vlag van een run die ook een externe link draagt (blijft overal bruikbaar als True/False)."""
+    def __new__(cls, bold, url):
+        o = int.__new__(cls, 1 if bold else 0)
+        o.url = url
+        return o
 
 
 def runs_to_markup(runs):
@@ -928,10 +965,13 @@ def runs_to_markup(runs):
     for text, bold in runs:
         t = re.sub(r'[\r\n\u000b]+', ' ', text)
         t = esc(t)
+        url = getattr(bold, 'url', None)
         if bold and t.strip():
-            parts.append('<b>' + t + '</b>')
-        else:
-            parts.append(t)
+            t = '<b>' + t + '</b>'
+        if url and t.strip():
+            lead = re.match(r'^\s*', t).group(0)
+            t = lead + '<a href="%s">%s</a>' % (esc(url).replace('"', '&quot;'), t[len(lead):])
+        parts.append(t)
     s = ''.join(parts)
     s = re.sub(r'[ \t]+', ' ', s)
     # \u2028 = regeleinde binnen een alinea (vervolgregel zonder witruimte ertussen, zoals op de dia)
@@ -2470,6 +2510,8 @@ def render_html(chapters, title, version=''):
             '\n.sl .block:has(+ .block > ul), .sl .block:has(+ .block > ol) { margin-bottom: .4em; }'  # 'Verder:' + lijst
             '\n.quiz figure.solution { margin: .6em 0 .9em; }'
             '\n.quiz .answer figure.fb-image { margin: .6em 0 0; }'
+            '\n.sl a { color: #1b62a5; text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: .5px; }'
+            '\n.sl a strong, .sl a b { color: inherit; }'
             '\n.popup figure.pu-img { margin: .6em 0 0; } .popup figure.pu-img img { max-height: 60mm; width: auto; max-width: 100%; }'
             '\ntable.imgtable { border-collapse: collapse; width: 100%; font-size: 8.8pt; line-height: 1.35; margin: .4em 0 1.2em; }'
             '\ntable.imgtable td { border: 1px solid var(--bd, #8aa); padding: .35em .55em; vertical-align: top; }'
