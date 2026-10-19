@@ -2351,7 +2351,7 @@ COMPACT_CSS = '''
 @page { margin: 16mm 18mm 18mm; }
 body.compact { font-size: 9.8pt; line-height: 1.45; }
 .compact .cover { min-height: 0; break-after: auto; display: block; padding: 0; margin: 0 0 9mm; }
-.compact .cover .cover-kicker { font-size: 8.5pt; letter-spacing: .08em; text-transform: uppercase; color: #bc1413; margin: 0 0 .5em; }
+.compact .cover .cover-kicker { font-size: 10pt; color: #bc1413; margin: 0 0 .3em; }
 .compact .cover h1 { font-size: 21pt; line-height: 1.15; margin: 0 0 .35em; letter-spacing: -.01em; }
 .compact .cover .cover-version { font-size: 9pt; color: #666; margin: 0; }
 .compact .cover .toc { display: none; }
@@ -2373,6 +2373,10 @@ body.compact { font-size: 9.8pt; line-height: 1.45; }
 .compact figure { break-inside: avoid; }
 .compact table.imgtable { font-size: 8.3pt; margin: .3em 0 .9em; }
 .compact table.imgtable td { padding: .22em .45em; }
+.compact .popup { border: 0; border-left: 3px solid #2f6fa3; border-radius: 0 6px 6px 0; background: #f3f6fa; padding: .65em .95em .7em; box-shadow: none; }
+.compact .popup .pu-head { background: none; color: #1d3a5c; padding: 0; margin: 0 0 .35em; font-size: 10.2pt; font-weight: 700; text-transform: none; letter-spacing: 0; }
+.compact .popup .pu-body { padding: 0; }
+.compact .popup.untitled { border-left-color: #9fb3c8; }
 '''
 
 
@@ -2547,7 +2551,10 @@ def main():
                     break
         # KOPPEN IN HOOFDLETTERS -> gewone zinsopbouw; afkortingen die in de lopende tekst ook in hoofdletters staan blijven
         body_txt = ' '.join(item_text(it) for ch in chapters for it in ch['items'] if it['kind'] in ('p', 'list', 'labelrows', 'popup', 'cards'))
-        acr = {w for w in re.findall(r'\b[A-Z][A-Z0-9]{1,6}\b', body_txt)}
+        # alleen hoofdletterwoorden uit zinnen die zelf niet in hoofdletters staan (AED, PDCA, LMRA; niet 'MET')
+        sents = [x for x in re.split(r'(?<=[.!?:])\s+|\n', body_txt) if x and x != x.upper()]
+        STOP = {'MET', 'VAN', 'EN', 'DE', 'HET', 'OP', 'IN', 'TE', 'BIJ', 'OF', 'EEN', 'AAN', 'NAAR', 'VOOR', 'TIP', 'NIET', 'GEEN', 'WEL', 'OM', 'ZIJ', 'HIJ', 'DOOR', 'ZODRA', 'ALS', 'DAT', 'DIE'}
+        acr = {w for x in sents for w in re.findall(r'\b[A-Z][A-Z0-9]{1,4}\b', x)} - STOP
         def _sc(t):
             if not t or t != t.upper() or not re.search(r'[A-Z]{3}', t):
                 return t
@@ -2557,14 +2564,34 @@ def main():
             if first is not None and out[first] == words[first].lower():
                 out[first] = out[first][:1].upper() + out[first][1:]
             return ' '.join(out)
-        for ch in chapters:
-            for it in ch['items']:
-                if it['kind'] in ('h2', 'h3'):
-                    it['text'] = _sc(it['text'])
-                elif it['kind'] == 'popup':
-                    it['title'] = _sc(it.get('title') or '')
-                elif it['kind'] == 'labelrows':
-                    it['rows'] = [(_sc(l), v) for l, v in it['rows']]
+        def _fix(o):
+            # overal (ook genest in naast-elkaar-blokken): koppen, pop-uptitels, losse kopregels in hoofdletters
+            if isinstance(o, dict):
+                k = o.get('kind')
+                if k in ('h2', 'h3', 'caption') and isinstance(o.get('text'), str):
+                    o['text'] = _sc(o['text'])
+                if isinstance(o.get('title'), str):
+                    o['title'] = _sc(o['title'])
+                if k == 'labelrows':
+                    o['rows'] = [(_sc(l), v) for l, v in o['rows']]
+                if k == 'p' and o.get('runs'):
+                    t0 = ''.join(r[0] for r in o['runs']).strip()
+                    if len(t0) <= 60 and t0 == t0.upper() and re.search(r'[A-Z]{3}', t0):
+                        o['runs'] = [(_sc(re.sub(r'\s+', ' ', t0)), True)]
+                if k == 'popup':
+                    fixed = []
+                    for kind, runs, tag in o['items']:
+                        t0 = ''.join(r[0] for r in runs).strip()
+                        if kind == 'p' and len(t0) <= 60 and t0 == t0.upper() and re.search(r'[A-Z]{3}', t0):
+                            runs = [(_sc(re.sub(r'\s+', ' ', t0)), True)]
+                        fixed.append((kind, runs, tag))
+                    o['items'] = fixed
+                for v in o.values():
+                    _fix(v)
+            elif isinstance(o, list):
+                for v in o:
+                    _fix(v)
+        _fix(chapters)
     for ch in chapters:
         for it in ch['items']:
             if it['kind'] == 'image':
