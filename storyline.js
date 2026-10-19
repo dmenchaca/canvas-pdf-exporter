@@ -17,7 +17,6 @@ function storylineInstallHelpers() {
   S.provenanceHtml = function (title, version) {
     const M = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
     const d = new Date();
-    const p2 = (n) => String(n).padStart(2, '0');
     const stamp = d.getDate() + ' ' + M[d.getMonth()] + ' ' + d.getFullYear();
     return '<aside class="provenance"><p>PDF-versie van de NIPV-e-module <em>' + S.esc(title) + '</em>, gemaakt op ' + stamp + '. ' +
       'Is de e-module gewijzigd? Neem dan contact op via support@oefio.nl, zodat deze PDF kan worden bijgewerkt.</p></aside>';
