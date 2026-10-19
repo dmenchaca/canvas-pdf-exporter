@@ -2355,6 +2355,7 @@ body.compact { font-size: 9.6pt; line-height: 1.42; }
 .compact .cover .provenance { margin-top: 1em; }
 .compact .chapter { break-before: auto; }
 .compact h2.section { font-size: 12.5pt; margin: 1.3em 0 .45em; padding-top: .5em; border-top: 1px solid #e3e3e3; }
+.compact .cover + .chapter > h2.section:first-child { border-top: 0; padding-top: 0; margin-top: .2em; }
 .compact h3, .compact .lblsec h3 { font-size: 10.5pt; margin: .9em 0 .25em; color: #1d3a5c; }
 .compact .lblsec { break-inside: avoid-page; }
 .compact .block { margin: 0 0 .55em; }
