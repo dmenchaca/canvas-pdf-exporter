@@ -2233,6 +2233,7 @@ def h_cell(items):
 
 OMIT_LAYERS = set()  # uit <cursus>.fixes.json: laag-id's die nooit getoond worden (restant van een sjabloon)
 OMIT_TEXT = []  # uit <cursus>.fixes.json: teksten die op de dia niet zichtbaar zijn (verborgen restanten)
+COMPACT = [False]  # --compact: instructiekaart-opmaak (dichter op elkaar, kopjes i.p.v. pijllabels)
 TABLES = {}  # afbeelding-url -> {'html': ...} uit <cursus>.tables.json (image-tables.py)
 
 
@@ -2279,6 +2280,8 @@ def h_item(it):
         n = len(it['figs'])
         cols = 2 if n == 4 else min(n, 5)  # vier foto's: 2x2 raster, groter en beter leesbaar
         return '<div class="figrow n%d%s">%s</div>' % (cols, ' grid' if cols < n else '', figs)
+    if k == 'labelrows' and COMPACT[0]:
+        return ''.join('<div class="lblsec"><h3>%s</h3>%s</div>' % (esc(l), h_blockitems(v)) for l, v in it['rows'])
     if k == 'labelrows':
         rows = ''.join('<div class="labelrow"><div class="lbl">%s</div><div class="val">%s</div></div>' % (esc(l), h_blockitems(v))
                        for l, v in it['rows'])
@@ -2342,6 +2345,34 @@ def h_item(it):
     return ''
 
 
+COMPACT_CSS = '''
+@page { margin: 14mm 16mm 16mm; }
+body.compact { font-size: 9.6pt; line-height: 1.42; }
+.compact .cover { min-height: 0; break-after: auto; display: block; padding: 0 0 4mm; margin: 0 0 6mm; border-bottom: 1px solid #ccc; }
+.compact .cover h1 { font-size: 19pt; margin: 0 0 .25em; }
+.compact .cover .cover-kicker { margin-bottom: .3em; }
+.compact .cover .toc { display: none; }
+.compact .cover .provenance { margin-top: 1em; }
+.compact .chapter { break-before: auto; }
+.compact h2.section { font-size: 12.5pt; margin: 1.3em 0 .45em; padding-top: .5em; border-top: 1px solid #e3e3e3; }
+.compact h3, .compact .lblsec h3 { font-size: 10.5pt; margin: .9em 0 .25em; color: #1d3a5c; }
+.compact .lblsec { break-inside: avoid-page; }
+.compact .block { margin: 0 0 .55em; }
+.compact p { margin: 0 0 .45em; }
+.compact figure img, .compact .gallery figure img { max-height: 48mm; }
+.compact .gallery figure.full img { max-height: 80mm; }
+.compact .image-aside figure img { max-height: 50mm; }
+.compact .popup { margin: .5em 0 .8em; padding: .5em .8em; }
+.compact .popup figure.pu-img img { max-height: 30mm; }
+.compact .popup, .compact .keep-pair, .compact .gallery { break-inside: auto; }
+.compact .popup .pu-head { break-after: avoid; }
+.compact figure, .compact .gallery figure img { break-inside: avoid; }
+.compact figure img { max-height: 42mm; }
+.compact table.imgtable { font-size: 8.3pt; margin: .3em 0 .8em; }
+.compact table.imgtable td { padding: .22em .45em; }
+'''
+
+
 def render_html(chapters, title, version=''):
     _OPT_SEQ[0] = 0
     toc = ''.join('<li><span class="tn">%s</span>%s</li>' % (('%d.' % ch['num']) if ch.get('num') else '', esc(ch['title'])) for ch in chapters)
@@ -2364,6 +2395,9 @@ def render_html(chapters, title, version=''):
                 parts.append(h_item(it))
         body = ''.join(parts)
         kicker = '<p class="kicker">Hoofdstuk %d</p>' % ch['num'] if ch.get('num') else ''
+        if COMPACT[0] and len(chapters) == 1:
+            secs.append('<section class="chapter">%s</section>' % body)  # één hoofdstuk: geen extra kop
+            continue
         secs.append('<section class="chapter"><div class="chapter-header">%s<h1>%s</h1></div>%s</section>'
                     % (kicker, esc(ch['title']), body))
     css = rise_css().replace('__CPE_TITLE__', title.replace('\\', '\\\\').replace('"', '\\"'))
@@ -2436,7 +2470,7 @@ def render_html(chapters, title, version=''):
             '\n.popup.untitled .pu-body { padding: .55em 1em .6em; }')
     css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.gallery figure.full { flex: 1 1 100%; }\n.gallery:has(figure.full) { break-inside: auto; }\n.gallery figure { break-inside: avoid; }\n.gallery figure.full img { max-height: 95mm; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
     return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
-            '<body class="forms sl">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
+            '<body class="forms sl%s">%s%s</body></html>') % (esc(title), css + (COMPACT_CSS if COMPACT[0] else ''), ' compact' if COMPACT[0] else '', cover, '\n'.join(secs))
 
 
 def render_via_chrome(chapters, title, out_pdf, version=''):
@@ -2468,6 +2502,7 @@ def main():
     ap.add_argument('--pdf')
     ap.add_argument('--report', action='store_true')
     ap.add_argument('--model', help='schrijf het documentmodel als JSON (debug)')
+    ap.add_argument('--compact', action='store_true', help='instructiekaart-opmaak: compacter, kopjes i.p.v. pijllabels, geen eindlogo')
     ap.add_argument('--reportlab', action='store_true', help='oude ReportLab-opmaak i.p.v. de Rise-stijl via Chrome')
     a = ap.parse_args()
     with open(a.dump, encoding='utf-8') as f:
@@ -2483,7 +2518,15 @@ def main():
     if os.path.exists(tpath):
         TABLES.update(json.load(open(tpath, encoding='utf-8')))
         print('tabellen uit afbeeldingen:', len(TABLES))
+    COMPACT[0] = a.compact or json.load(open(fpath, encoding='utf-8')).get('compact', False) if os.path.exists(fpath) else a.compact
     chapters = build_document(course)
+    if COMPACT[0]:
+        # slotdia ('Einde instructeurskaart' + groot logo + vaste slotzin) weglaten
+        for ch in chapters:
+            for i, it in enumerate(ch['items']):
+                if it['kind'] in ('h2', 'h3', 'p') and re.match(r'^\s*einde (instructeurs|instructie)kaart', item_text(it), re.I):
+                    ch['items'] = ch['items'][:i]
+                    break
     for ch in chapters:
         for it in ch['items']:
             if it['kind'] == 'image':
