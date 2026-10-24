@@ -317,12 +317,9 @@ def gapmatch_image(gg, pairs, images):
             continue
         w, hgt = float(obj.get('width') or im.width), float(obj.get('height') or im.height)
         im = im.resize((max(1, int(w * sx)), max(1, int(hgt * sy))))
-        # onderaan in het vak, op een wit label: de kop van het vak (bv. 'Brand') blijft leesbaar
-        cx, by = (c[0] + c[2]) / 2 * sx, c[3] * sy
-        x0, y0 = int(cx - im.width / 2), int(by - im.height - 6 * sy)
-        pad = int(4 * sx)
-        from PIL import ImageDraw
-        ImageDraw.Draw(base).rectangle([x0 - pad, y0 - pad, x0 + im.width + pad, y0 + im.height + pad], fill=(255, 255, 255, 235), outline=(29, 107, 47, 255), width=max(2, int(2 * sx)))
+        # zoals in de speler: linksboven in het vak, zonder kader; de vaktitel (midden) blijft vrij
+        pad = 6
+        x0, y0 = int((c[0] + pad) * sx), int((c[1] + pad) * sy)
         base.alpha_composite(im, (x0, y0))
     buf = io.BytesIO()
     base.convert('RGB').save(buf, 'JPEG', quality=88)
