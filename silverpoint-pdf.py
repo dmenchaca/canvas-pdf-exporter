@@ -89,7 +89,7 @@ def runs_html(el, link=None):
         if re.match(r'^(https?|mailto):', uri):
             return '<a href="%s">%s</a>' % (esc(uri), inner)
         att = attachment_key(uri)
-        if att:
+        if att and ATT.data.get(att):
             return '<a href="#%s">%s</a>' % (ATT.ref(att), inner)
         return inner
     return ''.join(runs_html(c) for c in children_of(el))
@@ -459,7 +459,8 @@ def h_image(e):
         return '<div class="sp-attach"><a href="#%s">📄 Bijlage %s: %s</a>%s</div>' % (
             r, r.split('-')[1], esc(ATT.name(att)), cap)
     if not e.get('data'):
-        return ''
+        # pictogram zonder afbeelding (bijlage): alleen het bijschrift, als gewone tekst
+        return ''.join('<div class="block">%s</div>' % blocks_html(c['blocks']) for c in e.get('caption', []))
     cap = ''.join('<figcaption>%s</figcaption>' % blocks_html(c['blocks']) for c in e.get('caption', []))
     return '<figure><img src="%s" alt="">%s</figure>' % (e['data'], cap)
 
@@ -582,9 +583,11 @@ def main():
     ap.add_argument('dump')
     ap.add_argument('--pdf')
     ap.add_argument('--model')
+    ap.add_argument('--bijlagen', action='store_true', help='bijlagen uit het pakket achteraan toevoegen en ernaar linken')
     a = ap.parse_args()
     dump = json.load(open(a.dump, encoding='utf-8'))
-    ATT.data = {re.sub(r'\s+', ' ', k).strip(): v for k, v in (dump.get('attachments') or {}).items()}
+    # bijlagen achteraan + links alleen met --bijlagen; standaard blijft de tekst zoals op de pagina
+    ATT.data = {re.sub(r'\s+', ' ', k).strip(): v for k, v in (dump.get('attachments') or {}).items()} if a.bijlagen else {}
     title, chapters, popups = build(dump)
     if a.model:
         json.dump({'title': title, 'chapters': chapters}, open(a.model, 'w'), ensure_ascii=False, indent=1,

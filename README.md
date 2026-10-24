@@ -51,7 +51,7 @@ De extensie herkent automatisch welk type cursus open staat:
   python3 silverpoint-pdf.py "<cursus>.sp.json"
   ```
 
-  Zelfde stijl als Rise en Storyline: echte tekst, tekst naast de afbeelding zoals op de pagina, vragen met het juiste antwoord aangevinkt of ingevuld, sleepvragen met afbeeldingen als opgeloste afbeelding, pop-up-pagina's (zoals de disclaimer) als kader. De klassieke modus (schermafbeeldingen) blijft voor deze cursussen ook beschikbaar. Zonder extensie: plak `console-silverpoint.js` in de console van het spelertabblad.
+  Zelfde stijl als Rise en Storyline: echte tekst, tekst naast de afbeelding zoals op de pagina, vragen met het juiste antwoord aangevinkt of ingevuld, sleepvragen met afbeeldingen als opgeloste afbeelding, pop-up-pagina's (zoals de disclaimer) als kader. Bijlagen uit het pakket (PDF's) blijven standaard gewone tekst zoals op de pagina; met `--bijlagen` worden ze achteraan toegevoegd en gelinkt. De klassieke modus (schermafbeeldingen) blijft voor deze cursussen ook beschikbaar. Zonder extensie: plak `console-silverpoint.js` in de console van het spelertabblad.
 
 Tips voor Rise-cursussen:
 - Sluit DevTools (F12) voordat je exporteert, anders kan de extensie niet aan het tabblad koppelen.
