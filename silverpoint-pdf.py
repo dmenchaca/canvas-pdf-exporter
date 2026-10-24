@@ -88,8 +88,37 @@ def runs_html(el, link=None):
             return '<span class="sp-pagelink" data-page="%s">%s</span>' % (esc(uri[7:].split('/')[0]), inner)
         if re.match(r'^(https?|mailto):', uri):
             return '<a href="%s">%s</a>' % (esc(uri), inner)
+        att = attachment_key(uri)
+        if att:
+            return '<a href="#%s">%s</a>' % (ATT.ref(att), inner)
         return inner
     return ''.join(runs_html(c) for c in children_of(el))
+
+
+def attachment_key(uri):
+    """int://local/Resources/x.pdf of rsc://<id>/Resources/__LNK/x.pdf -> 'Resources/...'."""
+    u = html.unescape(uri or '')
+    u = re.sub(r'^int://local/', '', u)
+    u = re.sub(r'^rsc://[^/]+/', '', u)
+    return re.sub(r'\s+', ' ', u).strip() if u.startswith('Resources/') else None
+
+
+class Attachments:
+    """Bijlagen uit het pakket: achteraan in de PDF, links in de tekst springen ernaartoe."""
+    def __init__(self):
+        self.data, self.order = {}, []
+
+    def ref(self, key):
+        if key not in self.order:
+            self.order.append(key)
+        return 'bijlage-%d' % (self.order.index(key) + 1)
+
+    def name(self, key):
+        n = os.path.splitext(key.split('/')[-1])[0]
+        return re.sub(r'^e-module .*? - ', '', n).strip(' .-')
+
+
+ATT = Attachments()
 
 
 def children_of(el):
@@ -326,7 +355,7 @@ def page_items(xaml, images, hidden_pages):
         elif t in ('TSImage', 'TSHotspotImage'):
             src = attr(el, 'Source', '')
             link = next((attr(b, 'Link') for b in el.iter() if local(b.tag) == 'NavigateBehavior'), None)
-            if src:
+            if src or link:
                 els.append({'kind': 'image', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': src, 'data': images.get(src, ''), 'link': link})
         elif t == 'MediaPlayer':
             els.append({'kind': 'video', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': attr(el, 'Source', '')})
@@ -340,6 +369,8 @@ def page_items(xaml, images, hidden_pages):
 
 
 def is_caption(e, img):
+    if img and attachment_key(img.get('link') or '') and abs(e['x'] - img['x']) <= 60 and 0 <= e['y'] - (img['y'] + img['h']) <= 60:
+        return True  # tekst onder een bijlage-pictogram
     t = blocks_text(e['blocks'])
     return (len(t) <= 90 and re.match(r'^(afbeelding|foto|bron|video)\b', t, re.I)) or \
         (img and 0 <= e['y'] - (img['y'] + img['h']) <= 40 and len(t) <= 90 and abs(e['x'] - img['x']) <= 40)
@@ -350,7 +381,7 @@ def layout(els):
     imgs = [e for e in els if e['kind'] == 'image']
     for e in els:
         if e['kind'] == 'text':
-            near = [i for i in imgs if 0 <= e['y'] - (i['y'] + i['h']) <= 40 and abs(e['x'] - i['x']) <= 60]
+            near = [i for i in imgs if 0 <= e['y'] - (i['y'] + i['h']) <= (60 if attachment_key(i.get('link') or '') else 40) and abs(e['x'] - i['x']) <= 60]
             if near and is_caption(e, near[0]):
                 near[0].setdefault('caption', []).append(e)
                 e['used'] = True
@@ -423,6 +454,13 @@ def h_quiz(q):
 
 
 def h_image(e):
+    att = attachment_key(e.get('link') or '')
+    if att and ATT.data.get(att):
+        # pictogram van een bijlage: als link naar de bijlage achteraan
+        r = ATT.ref(att)
+        cap = ''.join('<p><a href="#%s">%s</a></p>' % (r, re.sub(r'</?p>', '', blocks_html(c['blocks']))) for c in e.get('caption', []))
+        return '<div class="sp-attach"><a href="#%s">📄 Bijlage %s: %s</a>%s</div>' % (
+            r, r.split('-')[1], esc(ATT.name(att)), cap)
     if not e.get('data'):
         return ''
     cap = ''.join('<figcaption>%s</figcaption>' % blocks_html(c['blocks']) for c in e.get('caption', []))
@@ -455,6 +493,10 @@ def h_el(e, popups):
 
 
 CSS_EXTRA = """
+.sp .sp-attach { margin: .4em 0 1em; padding: .55em .8em; border: 1px solid #c6dcee; border-radius: 6px; background: #f3f8fc; }
+.sp .sp-attach > a { font-weight: 700; }
+.sp .sp-attach p { margin: .3em 0 0; font-size: 9pt; }
+.sp .sp-att-marker { color: #fff; font-size: 1pt; }
 .sp-aside { display: grid; grid-template-columns: 1fr 38%; gap: 6mm; align-items: start; margin: 0 0 1em; }
 .sp-aside .sp-media figure { margin: 0 0 .8em; }
 .sp-aside .sp-media img { width: 100%; height: auto; max-height: 70mm; object-fit: contain; }
@@ -482,6 +524,13 @@ def build(dump):
         if src:
             bl = [b for e in page_items(src, images, {}) if e['kind'] == 'text' for b in e['blocks']]
             popups[pid] = {'title': hp['title'], 'html': blocks_html(bl)}
+    # bijlagen nummeren in leesvolgorde (eerste vermelding in de cursus)
+    for p in pages:
+        src = files.get(p['src']) or ''
+        for m in re.finditer(r'(?:Link|NavigateUri)="([^"]+)"', src):
+            k = attachment_key(m.group(1))
+            if k and ATT.data.get(k):
+                ATT.ref(k)
     chapters, cur = [], None
     for p in pages:
         src = files.get(p['src'])
@@ -520,6 +569,12 @@ def render(title, chapters, popups):
             parts.append(body)
         secs.append('<section class="chapter"><div class="chapter-header"><p class="kicker">Hoofdstuk %d</p><h1>%s</h1></div>%s</section>'
                     % (i, esc(c['title']), ''.join(parts)))
+    for k in ATT.order:
+        if ATT.data.get(k):
+            r = ATT.ref(k)
+            secs.append('<section class="chapter sp-att" id="%s"><div class="chapter-header"><p class="kicker">Bijlage %s</p><h1>%s</h1></div>'
+                        '<p>Deze bijlage hoort bij de e-module en staat op de volgende pagina\'s.</p><p class="sp-att-marker">[[%s]]</p></section>'
+                        % (r, r.split('-')[1], esc(ATT.name(k)), r))
     css = B.CSS.replace('__CPE_TITLE__', title.replace('\\', '\\\\').replace('"', '\\"')) + CSS_EXTRA
     return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
             '<body class="forms sp">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
@@ -532,6 +587,7 @@ def main():
     ap.add_argument('--model')
     a = ap.parse_args()
     dump = json.load(open(a.dump, encoding='utf-8'))
+    ATT.data = {re.sub(r'\s+', ' ', k).strip(): v for k, v in (dump.get('attachments') or {}).items()}
     title, chapters, popups = build(dump)
     if a.model:
         json.dump({'title': title, 'chapters': chapters}, open(a.model, 'w'), ensure_ascii=False, indent=1,
@@ -545,7 +601,34 @@ def main():
     if r.returncode:
         raise SystemExit('book-to-print.py mislukt:\n' + r.stdout + r.stderr)
     print(r.stdout.strip())
+    append_attachments(out)
     print('OK', out)
+
+
+def append_attachments(pdf_path):
+    """Pagina's van de bijlagen invoegen na hun titelpagina ([[bijlage-N]]-markering)."""
+    if not any(ATT.data.get(k) for k in ATT.order):
+        return
+    import fitz
+    doc = fitz.open(pdf_path)
+    for k in reversed(ATT.order):
+        d = ATT.data.get(k)
+        if not d:
+            continue
+        mark = '[[%s]]' % ATT.ref(k)
+        pno = next((p.number for p in doc if mark in p.get_text()), None)
+        if pno is None:
+            continue
+        for rect in doc[pno].search_for(mark):
+            doc[pno].add_redact_annot(rect)
+        doc[pno].apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        src = fitz.open(stream=base64.b64decode(d.split(',', 1)[1]), filetype='pdf')
+        doc.insert_pdf(src, start_at=pno + 1)
+        print('bijlage toegevoegd:', ATT.name(k), len(src), "pagina's")
+    tmp = pdf_path + '.tmp'
+    doc.save(tmp, garbage=1, deflate=True)
+    doc.close()
+    os.replace(tmp, pdf_path)
 
 
 if __name__ == '__main__':

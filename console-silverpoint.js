@@ -58,13 +58,15 @@
     // Alle verwijzingen naar bestanden in Resources/ (afbeeldingen; video's en bijlagen alleen als naam).
     const refs = new Set();
     const add = (u) => {
-      u = (u || '').replace(/&amp;/g, '&').replace(/^int:\/\/local\//, '');
+      // int://local/Resources/x.pdf en rsc://<id>/Resources/__LNK/x.pdf zijn bijlagen in het pakket
+      u = (u || '').replace(/&amp;/g, '&').replace(/^int:\/\/local\//, '').replace(/^rsc:\/\/[^/]+\//, '');
       if (/^Resources\//.test(u)) refs.add(u);
     };
     for (const [k, v] of Object.entries(od)) {
       if (!/^(Pages|HiddenPages|MasterPages)\//.test(k)) continue;
       const txt = v.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
       (txt.match(/(?:Source|data)="(Resources\/[^"]+)"/g) || []).forEach((m) => add(m.replace(/^[a-zA-Z]+="/, '').replace(/"$/, '')));
+      (txt.match(/(?:Link|NavigateUri)="((?:int|rsc):\/\/[^"]+)"/g) || []).forEach((m) => add(m.replace(/^[a-zA-Z]+="/, '').replace(/"$/, '')));
     }
     const images = {};
     const list = Array.from(refs).filter((u) => /\.(png|jpe?g|gif|svg|bmp|webp)$/i.test(u));
@@ -85,7 +87,21 @@
       }
       if (!images[u]) P.log('afbeelding niet gevonden', u);
     }
-    const out = { kind: 'silverpoint', title: det.title, base, files: od, images, media: Array.from(refs).filter((u) => !images[u]) };
+    // Bijlagen (PDF) als data meenemen: in de PDF worden ze achteraan toegevoegd en gelinkt
+    const attachments = {};
+    for (const u of Array.from(refs).filter((x) => /\.pdf$/i.test(x))) {
+      for (const url of [base + u, base.replace(/js\/$/, '') + u, base + encodeURI(u)]) {
+        try {
+          const r = await fetch(url, { credentials: 'include' });
+          if (!r.ok || !/pdf/.test(r.headers.get('content-type') || '')) continue;
+          const b = await r.blob();
+          attachments[u] = await new Promise((ok, err) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = err; fr.readAsDataURL(b); });
+          break;
+        } catch (e) { /* volgende proberen */ }
+      }
+      if (!attachments[u]) P.log('bijlage niet gevonden', u);
+    }
+    const out = { kind: 'silverpoint', attachments, title: det.title, base, files: od, images, media: Array.from(refs).filter((u) => !images[u] && !attachments[u]) };
     const name = det.title.replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, '-').slice(0, 100) + '.sp.json';
     return { json: JSON.stringify(out), name, pages: det.pages, images: Object.keys(images).length, missing: list.length - Object.keys(images).length, title: det.title };
   };
