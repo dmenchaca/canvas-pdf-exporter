@@ -8,12 +8,14 @@ function currentMode() {
 function applyModeUI() {
   const mode = currentMode();
   document.querySelectorAll('.classic-only').forEach((el) => { el.style.display = mode === 'classic' ? '' : 'none'; });
-  document.querySelectorAll('.rise-only').forEach((el) => { el.style.display = (mode === 'rise' || mode === 'storyline') ? '' : 'none'; });
+  document.querySelectorAll('.rise-only').forEach((el) => { el.style.display = (mode === 'rise' || mode === 'storyline' || mode === 'silverpoint') ? '' : 'none'; });
   document.getElementById('hint').textContent = mode === 'rise'
     ? 'Maakt een nette PDF (echte tekst, eigen opmaak, antwoorden aangevinkt) van alle hoofdstukken.'
     : mode === 'storyline'
       ? 'Leest alle dia\'s van de Storyline-cursus en downloadt de cursusdata (.sl.json). Maak daarna de PDF met: python3 storyline-pdf.py <bestand>.sl.json'
-      : 'Maakt automatisch een PDF van de cursusinhoud.';
+      : mode === 'silverpoint'
+        ? 'Leest alle pagina\'s van de Silverpoint-cursus (menu links, "1 van 33") en downloadt de cursusbron (.sp.json). Maak daarna de PDF met: python3 silverpoint-pdf.py <bestand>.sp.json'
+        : 'Maakt automatisch een PDF van de cursusinhoud (dia\'s als afbeeldingen).';
 }
 
 document.getElementById('mode').addEventListener('change', applyModeUI);
@@ -23,6 +25,8 @@ document.getElementById('startBtn').addEventListener('click', () => {
     runRiseMode();
   } else if (currentMode() === 'storyline') {
     runStorylineMode();
+  } else if (currentMode() === 'silverpoint') {
+    runSilverpointMode();
   } else {
     runClassicMode();
   }
@@ -31,7 +35,7 @@ document.getElementById('startBtn').addEventListener('click', () => {
 document.getElementById('stopBtn').addEventListener('click', () => {
   if (currentMode() === 'rise') {
     stopRiseMode();
-  } else if (currentMode() === 'storyline') {
+  } else if (currentMode() === 'storyline' || currentMode() === 'silverpoint') {
     /* niet te onderbreken: leest alleen bestanden */
   } else {
     stopClassicMode();
@@ -70,6 +74,17 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('mode').value = 'storyline';
       document.getElementById('riseInfo').textContent = story.title + ' · Storyline-cursus gevonden';
       applyModeUI();
+      return;
+    }
+
+    const sp = await detectSilverpointCourse(tabId);
+    if (sp) {
+      // Silverpoint kan ook als schermafbeeldingen (klassiek); standaard de nieuwe tekstversie
+      document.getElementById('mode').value = 'silverpoint';
+      document.getElementById('riseInfo').textContent = sp.title + ' · Silverpoint-cursus gevonden (' + sp.pages + " pagina's)";
+      applyModeUI();
+      const pages = await detectClassicTotalPages(tabId);
+      if (pages) document.getElementById('totalPages').value = pages;
       return;
     }
 

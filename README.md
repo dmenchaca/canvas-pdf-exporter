@@ -30,7 +30,7 @@ Een Chrome-extensie om Canvas-pagina's automatisch te exporteren naar PDF.
    - **Resolutie**: Normaal (1x) of Hoog (2x) voor scherpere afbeeldingen
 4. Klik op **"Download als PDF"**
 
-## Twee soorten cursussen
+## Soorten cursussen
 
 De extensie herkent automatisch welk type cursus open staat:
 
@@ -44,6 +44,14 @@ De extensie herkent automatisch welk type cursus open staat:
   ```
 
   Dit levert dezelfde stijl als mode B (echte tekst, hoofdstukken met inhoudsopgave, vraagkaders met het juiste antwoord aangevinkt en een toelichting, echte PDF-vinkvakjes). Vereist Python 3 met `reportlab` en `Pillow` (`pip3 install reportlab pillow`). Zonder extensie: plak `console-storyline.js` in de console van het spelertabblad.
+
+- **Silverpoint** (mode D): oudere NIPV/IFV-e-modules met een menu links en een paginateller ("1 van 33"), gemaakt met Silverpoint (ThreeShips). De speler heeft de volledige cursusbron in het geheugen: per pagina de tekst, afbeeldingen, video's en de vragen (IMS QTI, met juiste antwoord en feedback). De extensie downloadt die als `<cursus>.sp.json`; de PDF maak je lokaal:
+
+  ```bash
+  python3 silverpoint-pdf.py "<cursus>.sp.json"
+  ```
+
+  Zelfde stijl als Rise en Storyline: echte tekst, tekst naast de afbeelding zoals op de pagina, vragen met het juiste antwoord aangevinkt of ingevuld, sleepvragen met afbeeldingen als opgeloste afbeelding, pop-up-pagina's (zoals de disclaimer) als kader. De klassieke modus (schermafbeeldingen) blijft voor deze cursussen ook beschikbaar. Zonder extensie: plak `console-silverpoint.js` in de console van het spelertabblad.
 
 Tips voor Rise-cursussen:
 - Sluit DevTools (F12) voordat je exporteert, anders kan de extensie niet aan het tabblad koppelen.
