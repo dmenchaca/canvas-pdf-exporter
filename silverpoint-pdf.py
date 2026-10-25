@@ -447,9 +447,8 @@ def image_as_text(images, src):
 def gap_field(t):
     """Ingevuld keuzevak/invulveld: als een gevuld veld met vinkje, zodat duidelijk is wat er gekozen moet worden.
     Inline opmaak, zodat het altijd zo afgedrukt wordt."""
-    return ('<span class="gap" style="display:inline-block;border:1.2px solid #1d6b2f;background:#e9f4ec;color:#14532d;'
-            'font-weight:700;border-radius:4px;padding:0 .45em;margin:0 .15em;line-height:1.45;white-space:nowrap">'
-            '<span style="color:#1d6b2f">&#10003;</span> %s</span>') % esc(t)
+    return ('<span class="gap" style="background:#eef6f0;color:#1f5c36;font-weight:600;border-bottom:1px solid #8fbf9f;'
+            'border-radius:2px;padding:0 .3em;white-space:nowrap">%s</span>') % esc(t)
 
 
 def gapmatch_image(gg, pairs, images):
