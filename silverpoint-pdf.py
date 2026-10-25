@@ -241,7 +241,10 @@ def build_question(qxml, images):
     gg = body.find('.//' + QTI + 'graphicGapMatchInteraction')
     if gg is not None:
         q['type'] = 'gapmatch'
-        q['solution'] = gapmatch_image(gg, correct.get(gg.get('responseIdentifier'), {}).get('values', []), images)
+        pairs = correct.get(gg.get('responseIdentifier'), {}).get('values', [])
+        q['solution_html'] = gapmatch_html(gg, pairs, images)   # echte tekst als dat kan
+        if not q['solution_html']:
+            q['solution'] = gapmatch_image(gg, pairs, images)
         return q
     if body.find('.//' + QTI + 'extendedTextInteraction') is not None:
         q['type'] = 'open'
@@ -257,14 +260,19 @@ def build_question(qxml, images):
         s = re.sub(r'\sxmlns(:\w+)?="[^"]*"', '', s)
         s = re.sub(r'<(/?)ns\d+:', r'<\1', s)
 
+        fields = []
+
+        def put(t):
+            fields.append(t)
+            return '\x00%d\x00' % (len(fields) - 1)
+
         def fill_inline(m):
             rid = re.search(r'responseIdentifier="([^"]+)"', m.group(0)).group(1)
             want = set(correct.get(rid, {}).get('values', []))
             for cm in re.finditer(r'<inlineChoice[^>]*identifier="([^"]+)"[^>]*>(.*?)</inlineChoice>', m.group(0), re.S):
                 if cm.group(1) in want:
-                    return '<span class="gap">%s</span>' % esc(plain(cm.group(2)))
-            return '<span class="gap">…</span>'
-        s = re.sub(r'<inlineChoiceInteraction.*?</inlineChoiceInteraction>', fill_inline, s, flags=re.S)
+                    return put(plain(cm.group(2)))
+            return put('…')
 
         def fill_text(m):
             rid = re.search(r'responseIdentifier="([^"]+)"', m.group(0)).group(1)
@@ -274,16 +282,174 @@ def build_question(qxml, images):
             t = vals[0] if vals else '…'
             if alts:
                 t += ' (ook goed: %s)' % ', '.join(alts)
-            return '<span class="gap">%s</span>' % esc(t)
+            return put(t)
+        s = re.sub(r'<inlineChoiceInteraction.*?</inlineChoiceInteraction>', fill_inline, s, flags=re.S)
         s = re.sub(r'<textEntryInteraction[^>]*/>', fill_text, s)
+        # opmaak van de bron weg (stijlen, div/span), daarna de ingevulde velden terugzetten
         s = re.sub(r'\s(style|class)="[^"]*"', '', s)
         s = re.sub(r'</?(div|span|itemBody)[^>]*>', '', s)
         s = re.sub(r'<p\s*/>|<p>\s*</p>', '', s)
+        only_field = not plain(re.sub(r'\x00\d+\x00', '', s))
+        s = re.sub(r'\x00(\d+)\x00', lambda m: gap_field(fields[int(m.group(1))]), s)
         q['gaps_html'] = s.strip()
-        q['gaps_only_field'] = not plain(re.sub(r'<mark[^>]*>.*?</span>', '', s))  # alleen het invulvak, geen zin
+        q['gaps_only_field'] = only_field  # alleen het invulvak, geen zin
         return q
     q['type'] = 'unknown'
     return q
+
+
+_TOOLS = None
+
+
+def tools():
+    """OCR (Apple Vision) uit image-tables.py."""
+    global _TOOLS
+    if _TOOLS is None:
+        spec = importlib.util.spec_from_file_location('image_tables', os.path.join(HERE, 'image-tables.py'))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        m.VISION = m.vision_bin()
+        _TOOLS = m
+    return _TOOLS
+
+
+def img_of(images, u):
+    from PIL import Image
+    d = images.get(u)
+    if not d:
+        return None
+    im = Image.open(io.BytesIO(base64.b64decode(d.split(',', 1)[1]))).convert('RGBA')
+    white = Image.new('RGBA', im.size, (255, 255, 255, 255))
+    return Image.alpha_composite(white, im).convert('RGB')   # transparante labels: op wit, niet op zwart
+
+
+def ocr_lines(im, scale=3):
+    """Tekstregels (van boven naar beneden) in een afbeelding; [] als er geen tekst is."""
+    from PIL import Image
+    T = tools()
+    big = im.resize((im.width * scale, im.height * scale), Image.LANCZOS)
+    p = os.path.join(tempfile.gettempdir(), 'cpe-sp-ocr.png')
+    big.save(p)
+    raw = sorted([l for l in T.ocr(p) if l['t'].strip()], key=lambda l: l['y'])
+    rows = []
+    for l in raw:   # regels op (bijna) dezelfde hoogte samen, dan links naar rechts
+        if rows and abs(l['y'] - rows[-1][0]['y']) < 0.5 * l['h']:
+            rows[-1].append(l)
+        else:
+            rows.append([l])
+    ls = [l for r in rows for l in sorted(r, key=lambda l: l['x'])]
+    return [dict(l, x=l['x'] / scale, y=l['y'] / scale, w=l['w'] / scale, h=l['h'] / scale) for l in ls]
+
+
+def text_only(im, lines):
+    """Afbeelding bestaat (vrijwel) alleen uit tekst op een effen achtergrond."""
+    import numpy as np
+    a = np.asarray(im).astype(int)
+    if not lines:
+        return False
+    bgc = np.median(a.reshape(-1, 3), axis=0)
+    ink = (np.abs(a - bgc).sum(2) > 90)
+    for l in lines:
+        ink[int(max(l['y'] - 2, 0)):int(l['y'] + l['h'] + 2), int(max(l['x'] - 2, 0)):int(l['x'] + l['w'] + 2)] = False
+    return ink.mean() < 0.01
+
+
+def gapmatch_html(gg, pairs, images):
+    """Sleepvraag als echte tekst: vakken in hun kleur met de titel uit de achtergrond en het juiste antwoord erin.
+    Alleen als de achtergrond per vak een effen kleur met tekst is en elk sleepitem alleen tekst is; anders None."""
+    try:
+        import numpy as np
+        bg = gg.find(QTI + 'object')
+        base = img_of(images, bg.get('data')) if bg is not None else None
+        if base is None:
+            return None
+        W, H = float(bg.get('width') or base.width), float(bg.get('height') or base.height)
+        sx, sy = base.width / W, base.height / H
+        gaps = {g.get('identifier'): g.find(QTI + 'object') for g in gg.iter(QTI + 'gapImg')}
+        spots = [(h.get('identifier'), [float(x) for x in (h.get('coords') or '0,0,0,0').split(',')]) for h in gg.iter(QTI + 'associableHotspot')]
+        answer = {}
+        for p in pairs:
+            g, h = (p.split() + ['', ''])[:2]
+            answer.setdefault(h, []).append(g)
+        cells = []
+        for hid, c in spots:
+            m = 6  # randlijnen van het raster niet meetellen
+            box = base.crop((int(c[0] * sx) + m, int(c[1] * sy) + m, int(c[2] * sx) - m, int(c[3] * sy) - m))
+            a = np.asarray(box).astype(int)
+            q = (a // 16) * 16
+            vals, cnt = np.unique(q.reshape(-1, 3), axis=0, return_counts=True)
+            if cnt.max() / cnt.sum() < 0.6:
+                return None                       # geen effen vak (foto/tekening)
+            col = vals[cnt.argmax()] + 8
+            lines = ocr_lines(box)
+            if not lines or not text_only(box, lines):
+                return None
+            title = ' '.join(l['t'] for l in lines)
+            ink = np.median(a[(np.abs(a - col).sum(2) > 150)].reshape(-1, 3), axis=0) if (np.abs(a - col).sum(2) > 150).any() else [0, 0, 0]
+            labels = []
+            for g in answer.get(hid, []):
+                obj = gaps.get(g)
+                im = img_of(images, obj.get('data')) if obj is not None else None
+                if im is None:
+                    return None
+                gl = ocr_lines(im)
+                if not gl or not text_only(im, gl):
+                    return None
+                labels.append(' '.join(l['t'] for l in gl))
+            cells.append({'c': c, 'bg': '#%02x%02x%02x' % tuple(int(v) for v in col),
+                          'fg': '#%02x%02x%02x' % tuple(int(v) for v in ink), 'title': title, 'labels': labels})
+        out = []
+        for cl in cells:
+            c = cl['c']
+            st = 'left:%.2f%%;top:%.2f%%;width:%.2f%%;height:%.2f%%;background:%s;color:%s' % (
+                c[0] / W * 100, c[1] / H * 100, (c[2] - c[0]) / W * 100, (c[3] - c[1]) / H * 100, cl['bg'], cl['fg'])
+            labs = ''.join('<div class="gm-answer">%s</div>' % esc(t) for t in cl['labels'])
+            out.append('<div class="gm-cell" style="%s">%s<div class="gm-title">%s</div></div>' % (st, labs, esc(cl['title'])))
+        return '<div class="gm-board" style="aspect-ratio:%s/%s">%s</div>' % (int(W), int(H), ''.join(out))
+    except Exception as e:  # OCR niet beschikbaar (geen macOS) of onverwachte vorm: terug naar de afbeelding
+        print('sleepvraag als afbeelding:', e)
+        return None
+
+
+TEXT_IMAGES = [True]
+
+
+def image_as_text(images, src):
+    """Regel: een afbeelding die alleen tekst op een effen achtergrond is, wordt echte tekst (in de eigen kleuren)."""
+    try:
+        import numpy as np
+        im = img_of(images, src)
+        if im is None or im.width * im.height < 2000:
+            return None
+        small = im if im.width <= 1200 else im.resize((1200, int(im.height * 1200 / im.width)))
+        ls = ocr_lines(small, 2)
+        if not ls or not text_only(small, ls):
+            return None
+        a = np.asarray(small).astype(int)
+        bgc = np.median(a.reshape(-1, 3), axis=0)
+        mask = np.abs(a - bgc).sum(2) > 150
+        ink = np.median(a[mask].reshape(-1, 3), axis=0) if mask.any() else np.array([0, 0, 0])
+        rows, cur = [], []
+        for l in ls:   # regels met een duidelijke witregel ertussen = nieuwe alinea
+            if cur and l['y'] - (cur[-1]['y'] + cur[-1]['h']) > 0.8 * l['h']:
+                rows.append(cur)
+                cur = []
+            cur.append(l)
+        rows.append(cur)
+        body = ''.join('<p>%s</p>' % esc(' '.join(l['t'] for l in r)) for r in rows)
+        return '<div class="sp-textimage" style="background:#%02x%02x%02x;color:#%02x%02x%02x">%s</div>' % (
+            tuple(int(v) for v in bgc) + tuple(int(v) for v in ink) + (body,))
+    except Exception as e:
+        print('afbeelding blijft afbeelding:', src, e)
+        return None
+
+
+def gap_field(t):
+    """Ingevuld keuzevak/invulveld: als een gevuld veld met vinkje, zodat duidelijk is wat er gekozen moet worden.
+    Inline opmaak, zodat het altijd zo afgedrukt wordt."""
+    return ('<span class="gap" style="display:inline-block;border:1.2px solid #1d6b2f;background:#e9f4ec;color:#14532d;'
+            'font-weight:700;border-radius:4px;padding:0 .45em;margin:0 .15em;line-height:1.45;white-space:nowrap">'
+            '<span style="color:#1d6b2f">&#10003;</span> %s</span>') % esc(t)
 
 
 def gapmatch_image(gg, pairs, images):
@@ -352,6 +518,11 @@ def page_items(xaml, images, hidden_pages):
         elif t in ('TSImage', 'TSHotspotImage'):
             src = attr(el, 'Source', '')
             link = next((attr(b, 'Link') for b in el.iter() if local(b.tag) == 'NavigateBehavior'), None)
+            if src and images.get(src) and TEXT_IMAGES[0]:
+                tb = image_as_text(images, src)
+                if tb:
+                    els.append({'kind': 'textimage', 'x': x, 'y': y, 'w': w, 'h': hh, 'html': tb})
+                    continue
             if src or link:
                 els.append({'kind': 'image', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': src, 'data': images.get(src, ''), 'link': link})
         elif t == 'MediaPlayer':
@@ -438,7 +609,9 @@ def h_quiz(q):
         else:
             out.append('<div class="gaps">%s</div>' % q['gaps_html'])
     elif q['type'] == 'gapmatch':
-        if q.get('solution'):
+        if q.get('solution_html'):
+            out.append('<figure class="solution">%s<figcaption>Juiste oplossing</figcaption></figure>' % q['solution_html'])
+        elif q.get('solution'):
             out.append('<figure class="solution"><img src="%s" alt=""><figcaption>Juiste oplossing</figcaption></figure>' % q['solution'])
     elif q['type'] == 'open':
         out.append('<p class="hint">Open vraag: schrijf je antwoord op en vergelijk het met het voorbeeld hieronder.</p>')
@@ -478,6 +651,8 @@ def h_el(e, popups):
         return '<div class="block">%s</div>%s' % (h, extra)
     if k == 'image':
         return h_image(e)
+    if k == 'textimage':
+        return e['html']
     if k == 'video':
         name = os.path.splitext(os.path.basename(e.get('src') or ''))[0]
         return '<p class="note">[Video in de e-module%s]</p>' % (': ' + esc(name) if name else '')
@@ -491,6 +666,13 @@ def h_el(e, popups):
 
 
 CSS_EXTRA = """
+.sp .sp-textimage { padding: .6em .9em; border-radius: 4px; margin: .4em 0 1em; }
+.sp .sp-textimage p { margin: 0 0 .35em; }
+.sp .gm-board { position: relative; width: 100%; max-width: 150mm; border: 1px solid #111; margin: .4em 0 .2em; break-inside: avoid; }
+.sp .gm-cell { position: absolute; box-sizing: border-box; border: 1px solid #111; padding: 2.2mm 2.6mm; display: flex; flex-direction: column; }
+.sp .gm-title { margin: auto 0; text-align: center; font-size: 15pt; font-weight: 700; line-height: 1.15; }
+.sp .gm-answer { align-self: flex-start; background: rgba(255,255,255,.92); color: #1a1a1a; border-left: 3px solid #1d6b2f; padding: .15em .45em; font-size: 8.8pt; line-height: 1.3; margin: 0 0 .25em; max-width: 92%; }
+.sp .gm-answer::before { content: "✓ "; color: #1d6b2f; font-weight: 700; }
 .sp .sp-attach { margin: .4em 0 1em; padding: .55em .8em; border: 1px solid #c6dcee; border-radius: 6px; background: #f3f8fc; }
 .sp .sp-attach > a { font-weight: 700; }
 .sp .sp-attach p { margin: .3em 0 0; font-size: 9pt; }
