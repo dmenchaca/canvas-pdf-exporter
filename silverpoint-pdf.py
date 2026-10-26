@@ -75,7 +75,8 @@ def runs_html(el, link=None):
         txt = attr(el, 'Text', '') or ''
         h = esc(txt).replace('\n', '<br/>')
         if not txt.strip():
-            return h if '\n' not in txt else ''
+            # alleen een regelovergang (Text="&#xA;") is wel inhoud: anders plakken kop en tekst aan elkaar
+            return '<br/>' * txt.count('\n') if '\n' in txt else h
         if (attr(el, 'FontWeight', '') or '').lower() == 'bold':
             h = '<strong>' + h + '</strong>'
         if (attr(el, 'FontStyle', '') or '').lower() == 'italic':
@@ -143,9 +144,11 @@ def doc_blocks(doc):
         t = local(el.tag)
         if t == 'C1Paragraph':
             h = ''.join(runs_html(c) for c in children_of(el)).strip()
-            h = re.sub(r'^(<br/>)+|(<br/>)+$', '', h)
-            if norm(re.sub(r'<[^>]+>', '', h)):
-                blocks.append(('p', h))
+            h = re.sub(r'^(<br/>|\s)+|(<br/>|\s)+$', '', h)
+            # witregel binnen een alinea = nieuwe alinea
+            for part in re.split(r'(?:\s*<br/>\s*){2,}', h):
+                if norm(re.sub(r'<[^>]+>', '', part)):
+                    blocks.append(('p', part))
         elif t == 'C1List':
             items = []
             for li in children_of(el):
@@ -198,6 +201,24 @@ def qti_inner(el):
     return s.strip()
 
 
+def qti_html(el, images):
+    """Zoals qti_inner, maar afbeeldingen uit het pakket blijven zichtbaar (als data-URL)."""
+    s = qti_inner(el)
+
+    def img(m):
+        src = html.unescape(m.group(1))
+        d = images.get(src) or images.get(re.sub(r'^\./', '', src))
+        if d:
+            return '<img class="qti-img" src="%s" alt="">' % d
+        if re.match(r'https?://', src):
+            return '<img class="qti-img" src="%s" alt="">' % esc(src)
+        return ''
+    s = re.sub(r'<img\b[^>]*?\bdata-src="([^"]+)"[^>]*/?>', img, s)   # lokale kopie in het pakket
+    s = re.sub(r'<img\b(?![^>]*class="qti-img")[^>]*?\bsrc="([^"]+)"[^>]*/?>', img, s)
+    s = re.sub(r'<object\b[^>]*?\bdata="([^"]+)"[^>]*>(?:.*?</object>)?', img, s, flags=re.S)
+    return s
+
+
 def plain(h):
     return norm(html.unescape(re.sub(r'<[^>]+>', ' ', h or '')))
 
@@ -218,18 +239,20 @@ def explanation(fb):
     rest = LEAD_RE.sub('', t, count=1)
     if plain(rest):
         return t
-    # alleen lof ('Goed.'): de uitleg staat dan vaak in de feedback bij een fout antwoord ('Goed zijn: ...')
-    f = (fb.get('F') or '').strip()
-    if plain(f) and not re.match(r'^\s*(controleer|probeer|kijk nog|helaas[,.]?\s*(probeer|dat is niet))', plain(f), re.I):
-        return f
-    return ''
+    return ''   # alleen lof ('Goed.', 'Correct!')
 
 
 def build_question(qxml, images):
     root = ET.fromstring(qxml)
     body = root.find(QTI + 'itemBody')
-    fb = feedback_of(root)
-    q = {'kind': 'quiz', 'title': root.get('title') or '', 'explanation': explanation(fb), 'tip': '', 'type': ''}
+    fb = {m.get('identifier'): qti_html(m, images) for m in root.iter(QTI + 'modalFeedback')}   # met afbeeldingen uit het pakket
+    q = {'kind': 'quiz', 'title': root.get('title') or '', 'explanation': explanation(fb), 'type': ''}
+    # tip en feedback bij een fout antwoord: letterlijk zoals in de e-module
+    for m in root.iter(QTI + 'modalFeedback'):
+        if m.get('identifier') == 'TS_TIP':
+            q['tip'] = qti_html(m, images)
+        elif m.get('identifier') == 'F':
+            q['wrong'] = qti_html(m, images)
     correct = {}
     for rd in root.iter(QTI + 'responseDeclaration'):
         vals = [v.text or '' for v in rd.iter(QTI + 'value')]
@@ -241,11 +264,34 @@ def build_question(qxml, images):
         ok = set(correct.get(ch.get('responseIdentifier'), {}).get('values', []))
         q['multi'] = ch.get('maxChoices') != '1'
         q['options'] = [(plain(qti_inner(sc)), sc.get('identifier') in ok) for sc in ch.iter(QTI + 'simpleChoice')]
+        # afbeeldingen in een antwoordoptie (soms is de optie alleen een afbeelding)
+        q['option_imgs'] = [re.findall(r'<img class="qti-img" src="[^"]+" alt="">', qti_html(sc, images)) for sc in ch.iter(QTI + 'simpleChoice')]
+        return q
+    oi = body.find('.//' + QTI + 'orderInteraction')
+    if oi is not None:
+        # volgordevraag: de stappen in de juiste volgorde
+        q['type'] = 'order'
+        items = {sc.get('identifier'): qti_html(sc, images) for sc in oi.iter(QTI + 'simpleChoice')}
+        order = [v for v in correct.get(oi.get('responseIdentifier'), {}).get('values', []) if v in items]
+        order += [k for k in items if k not in order]
+        q['order'] = [items[k] for k in order]
+        pr = oi.find(QTI + 'prompt')
+        if pr is not None and plain(qti_inner(pr)):
+            q['prompt'] = qti_html(pr, images)
         return q
     gg = body.find('.//' + QTI + 'graphicGapMatchInteraction')
     if gg is not None:
         q['type'] = 'gapmatch'
         pairs = correct.get(gg.get('responseIdentifier'), {}).get('values', [])
+        # alle labels als tekst (op de afbeelding staan ze getekend); labels zonder plek apart
+        labels = {}
+        for gi in gg.iter(QTI + 'gapImg'):
+            lab = plain(html.unescape(gi.get('objectLabel') or ''))
+            if lab:
+                labels[gi.get('identifier')] = lab
+        used = {p.split()[0] for p in pairs if p.split()}
+        q['labels'] = [l for i, l in labels.items() if i in used]
+        q['unused'] = [l for i, l in labels.items() if i not in used]
         q['solution_html'] = gapmatch_html(gg, pairs, images)   # echte tekst als dat kan
         if not q['solution_html']:
             q['solution'] = gapmatch_image(gg, pairs, images)
@@ -255,9 +301,13 @@ def build_question(qxml, images):
         q['type'] = 'gapmatch'   # zelfde weergave: afbeelding met de juiste oplossing
         q['solution'] = selectpoint_image(sp, root, images)
         return q
-    if body.find('.//' + QTI + 'extendedTextInteraction') is not None:
+    et = body.find('.//' + QTI + 'extendedTextInteraction')
+    if et is not None:
         q['type'] = 'open'
+        q['correct_text'] = ' '.join(v for v in correct.get(et.get('responseIdentifier'), {}).get('values', []) if v.strip())
         q['model'] = fb.get('F') or fb.get('T') or ''
+        if fb.get('F'):
+            q.pop('wrong', None)   # staat al als voorbeeldantwoord
         return q
     inl = list(body.iter(QTI + 'inlineChoiceInteraction'))
     te = list(body.iter(QTI + 'textEntryInteraction'))
@@ -579,6 +629,16 @@ def html_blocks(h):
         inner = re.sub(r'<span[^>]*font-style:\s*italic[^>]*>(.*?)</span>', r'<em>\1</em>', inner, flags=re.S)
         inner = re.sub(r'<(?!/?(strong|em|br|a)\b)[^>]+>', '', inner)
         inner = re.sub(r'\s(class|style)="[^"]*"', '', inner).strip()
+        inner = re.sub(r'<br\s*/?>', '<br>', inner)
+        # link naar een verborgen pagina (pop-up) in htmlcontent: zelfde markering als bij C1Hyperlink
+        inner = re.sub(r'<a\s+[^>]*href="page://([\w-]+)[^"]*"[^>]*>(.*?)</a>',
+                       lambda m: '<span class="sp-pagelink" data-page="%s">%s</span>' % (m.group(1), m.group(2)), inner, flags=re.S)
+        # witregel (twee of meer <br>) = nieuwe alinea; één <br> blijft een regelovergang
+        parts = [x for x in re.split(r'(?:\s*<br>\s*){2,}', inner) if plain(x)]
+        if m.group(1) == 'p' and len(parts) > 1:
+            out.extend(('p', re.sub(r'(?:\s*<br>)+\s*$', '', x)) for x in parts)
+            continue
+        inner = re.sub(r'(?:\s*<br>)+\s*$', '', inner)
         if plain(inner):
             if m.group(1) == 'li' and out and out[-1][0] == 'ul':
                 out[-1][1].append(inner)
@@ -599,15 +659,27 @@ def table3_html(el):
         rtb = next((x for x in b.iter() if local(x.tag) == 'RichTextBox'), None)
         xa = html.unescape(attr(rtb, 'Xaml', '') or '') if rtb is not None else ''
         paras = []
-        for pm in re.finditer(r'<Paragraph\b[^>]*>(.*?)</Paragraph>', xa, re.S):
+        try:
+            sec = ET.fromstring(xa) if xa.strip() else None
+        except ET.ParseError:
+            sec = None
+        for pg in ([x for x in sec.iter() if local(x.tag) == 'Paragraph'] if sec is not None else []):
             runs = []
-            for rm in re.finditer(r'<Run\b([^>]*)Text="([^"]*)"', pm.group(1)):
-                t = esc(html.unescape(rm.group(2)))
-                if re.search(r'FontWeight="Bold"', rm.group(1)):
-                    t = '<strong>%s</strong>' % t
-                runs.append(t)
-            if plain(''.join(runs)):
-                paras.append(''.join(runs))
+            for rn in pg.iter():
+                lt = local(rn.tag)
+                if lt == 'Run':
+                    # tekst als attribuut (Text="...") of als inhoud (<Run>...</Run>)
+                    t = esc(rn.get('Text') if rn.get('Text') is not None else (rn.text or ''))
+                    if (rn.get('FontWeight') or '').lower() == 'bold' and t.strip():
+                        t = '<strong>%s</strong>' % t
+                    if (rn.get('FontStyle') or '').lower() == 'italic' and t.strip():
+                        t = '<em>%s</em>' % t
+                    runs.append(t)
+                elif lt == 'LineBreak':
+                    runs.append('<br/>')
+            h = re.sub(r'^(<br/>|\s)+|(<br/>|\s)+$', '', ''.join(runs))
+            if plain(h):
+                paras.append(h)
         cells[(r, c)] = ''.join('<p>%s</p>' % x for x in paras)
     if not cells:
         return ''
@@ -648,15 +720,26 @@ def page_items(xaml, images, hidden_pages):
             if not bl:
                 doc = next((d for d in el.iter() if local(d.tag) == 'C1Document'), None)
                 bl = doc_blocks(doc) if doc is not None else []
-            if bl:
-                els.append({'kind': 'popupbox', 'x': x, 'y': y, 'w': w, 'h': hh, 'blocks': bl})
+            icon = attr(el, 'IconSource', '') or ''
+            if bl or images.get(icon):
+                els.append({'kind': 'popupbox', 'x': x, 'y': y, 'w': w, 'h': hh, 'blocks': bl,
+                            'icon': images.get(icon, '')})
             continue
         if t == 'Table3':
             els.append({'kind': 'table', 'x': x, 'y': y, 'w': w, 'h': hh, 'html': table3_html(el)})
             continue
         if t == 'Carousel':
-            items = re.findall(r'source="([^"]+)"', html.unescape(attr(el, 'ItemsXML', '') or ''))
-            els.append({'kind': 'carousel', 'x': x, 'y': y, 'w': w, 'h': hh, 'srcs': items, 'data': [images.get(u, '') for u in items]})
+            # elke dia: afbeelding + titel + beschrijving
+            slides = []
+            try:
+                ix = ET.fromstring(attr(el, 'ItemsXML', '') or '<items/>')
+                for it in ix.iter('item'):
+                    slides.append({'src': it.get('source') or '', 'title': it.get('title') or '', 'descr': it.get('descr') or ''})
+            except ET.ParseError:
+                slides = [{'src': u, 'title': '', 'descr': ''} for u in re.findall(r'source="([^"]+)"', html.unescape(attr(el, 'ItemsXML', '') or ''))]
+            for sl in slides:
+                sl['data'] = images.get(sl['src'], '')
+            els.append({'kind': 'carousel', 'x': x, 'y': y, 'w': w, 'h': hh, 'slides': slides})
             continue
         if t == 'HtmlPlayer':
             url = attr(el, 'DisplayName', '') or ''
@@ -688,10 +771,13 @@ def page_items(xaml, images, hidden_pages):
             if rtb is not None and not w:
                 rw = attr(rtb, 'Width', '0')
                 w = float(rw) if rw not in (None, 'NaN', '') else 0.0
-            if doc is not None:
-                bl = doc_blocks(doc)
-                if bl:
-                    els.append({'kind': 'text', 'x': x, 'y': y, 'w': w, 'h': hh, 'blocks': bl})
+            bl = doc_blocks(doc) if doc is not None else []
+            if not bl:
+                # geen (gevuld) C1Document: de tekst staat alleen in htmlcontent (bijv. vraagtitel)
+                hc = html.unescape(attr(el, 'htmlcontent', '') or '')
+                bl = html_blocks(hc) if hc else []
+            if bl:
+                els.append({'kind': 'text', 'x': x, 'y': y, 'w': w, 'h': hh, 'blocks': bl})
         elif t in ('TSImage', 'TSHotspotImage'):
             src = attr(el, 'Source', '')
             link = next((attr(b, 'Link') for b in el.iter() if local(b.tag) == 'NavigateBehavior'), None)
@@ -703,6 +789,10 @@ def page_items(xaml, images, hidden_pages):
             if src or link:
                 els.append({'kind': 'image', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': src, 'data': images.get(src, ''), 'link': link,
                             'popup': popup})
+            # pictogram op de pagina dat een andere afbeelding is dan de vergroting: beide tonen
+            ic = attr(el, 'IconSource', '') or ''
+            if ic and ic != src and images.get(ic):
+                els.append({'kind': 'image', 'x': x, 'y': y - 0.5, 'w': w, 'h': hh, 'src': ic, 'data': images[ic], 'link': None, 'popup': False})
         elif t == 'MediaPlayer':
             els.append({'kind': 'video', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': attr(el, 'Source', '')})
         elif t == 'Question':
@@ -733,6 +823,18 @@ def layout(els):
                 e['used'] = True
     rest = [e for e in els if not e.get('used')]
     rest.sort(key=lambda e: (e['y'] if e['kind'] != 'quiz' else e['y'] + 1e4, e['x']))
+    # elementen op (bijna) dezelfde hoogte = één rij: van links naar rechts lezen
+    rows, row = [], []
+    for e in rest:
+        if row and e['kind'] != 'quiz' and row[0]['kind'] != 'quiz' and abs(e['y'] - row[0]['y']) <= 40:
+            row.append(e)
+        else:
+            if row:
+                rows.append(row)
+            row = [e]
+    if row:
+        rows.append(row)
+    rest = [e for r in rows for e in sorted(r, key=lambda e: e['x'])]
     # Hoofdtekst links (x < 380) en afbeeldingen rechts: als twee kolommen tonen
     left = [e for e in rest if e['kind'] == 'text' and e['x'] < 380]
     right = [e for e in rest if e['kind'] in ('image', 'video') and e['x'] >= 380]
@@ -778,8 +880,10 @@ def h_quiz(q):
         for text, ok in q['options']:
             _SEQ[0] += 1
             m = 'cpeopt%04d' % _SEQ[0]
-            lis.append('<li data-opt="%s" data-mark="%s"%s><span class="cpe-mark">%s</span>%s</li>' % (
-                esc(text), m, ' data-correct="1" class="correct"' if ok else '', m, esc(text)))
+            imgs = ''.join((q.get('option_imgs') or [[]] * len(q['options']))[len(lis)])
+            lis.append('<li data-opt="%s" data-mark="%s"%s><span class="cpe-mark">%s</span>%s%s</li>' % (
+                esc(text), m, ' data-correct="1" class="correct"' if ok else '', m, esc(text),
+                '<span class="opt-imgs">%s</span>' % imgs if imgs else ''))
         out.append('<ul class="options %s">%s</ul>' % ('check' if q.get('multi') else 'radio', ''.join(lis)))
     elif q['type'] == 'gaps':
         if q.get('gaps_only_field'):
@@ -790,13 +894,28 @@ def h_quiz(q):
         if q.get('solution_html'):
             out.append('<figure class="solution">%s<figcaption>Juiste oplossing</figcaption></figure>' % q['solution_html'])
         elif q.get('solution'):
-            out.append('<figure class="solution"><img src="%s" alt=""><figcaption>Juiste oplossing</figcaption></figure>' % q['solution'])
+            lab = (': ' + ', '.join(esc(l) for l in q['labels'])) if q.get('labels') else ''
+            out.append('<figure class="solution"><img src="%s" alt=""><figcaption>Juiste oplossing%s</figcaption></figure>' % (q['solution'], lab))
+        if q.get('unused'):
+            out.append('<div class="answer"><span class="answer-label">Hoort nergens bij:</span> %s</div>' % ', '.join(esc(l) for l in q['unused']))
+    elif q['type'] == 'order':
+        if q.get('prompt'):
+            out.append('<div class="question">%s</div>' % q['prompt'])
+        out.append('<div class="answer"><span class="answer-label">Juiste volgorde:</span><ol class="sp-order">%s</ol></div>'
+                   % ''.join('<li>%s</li>' % x for x in q['order']))
     elif q['type'] == 'open':
         out.append('<p class="hint">Open vraag: schrijf je antwoord op en vergelijk het met het voorbeeld hieronder.</p>')
         if plain(q.get('model')):
             out.append('<div class="answer"><span class="answer-label">Voorbeeldantwoord:</span> %s</div>' % q['model'])
+        ct = q.get('correct_text') or ''
+        if plain(ct) and plain(ct) not in plain(q.get('model')):
+            out.append('<div class="answer"><span class="answer-label">Juiste antwoord:</span> %s</div>' % esc(ct))
     if q.get('explanation') and q['type'] != 'open':
         out.append('<div class="answer"><span class="answer-label">Toelichting:</span> %s</div>' % q['explanation'])
+    if plain(q.get('wrong')) and plain(q['wrong']) != plain(q.get('explanation')):
+        out.append('<div class="answer"><span class="answer-label">Bij een fout antwoord:</span> %s</div>' % q['wrong'])
+    if plain(q.get('tip')):
+        out.append('<div class="answer sp-tip"><span class="answer-label">Tip:</span> %s</div>' % q['tip'])
     out.append('</div>')
     return ''.join(out)
 
@@ -825,11 +944,28 @@ def h_image(e):
             DEFER[-1].append(box)
             return img
         return img + box
+    ext = e.get('link') or ''
+    if re.match(r'^(https?|mailto):', ext):
+        # afbeelding die naar een website linkt: klikbaar, met het adres eronder
+        cap = ''.join('<figcaption>%s</figcaption>' % blocks_html(c['blocks']) for c in e.get('caption', []))
+        img = '<a href="%s"><img src="%s" alt=""></a>' % (esc(ext), e['data']) if e.get('data') else ''
+        return '<figure>%s%s<figcaption>Link: <a href="%s">%s</a></figcaption></figure>' % (img, cap, esc(ext), esc(ext))
     if not e.get('data'):
         # pictogram zonder afbeelding (bijlage): alleen het bijschrift, als gewone tekst
         return ''.join('<div class="block">%s</div>' % blocks_html(c['blocks']) for c in e.get('caption', []))
     cap = ''.join('<figcaption>%s</figcaption>' % blocks_html(c['blocks']) for c in e.get('caption', []))
     return '<figure><img src="%s" alt="">%s</figure>' % (e['data'], cap)
+
+
+def popup_boxes(h, popups):
+    """Kaders voor pop-ups waar h naar linkt en die nog niet getoond zijn."""
+    out = ''
+    for pid in re.findall(r'data-page="([^"]+)"', h):
+        if pid in popups and not popups[pid].get('shown'):
+            popups[pid]['shown'] = True
+            out += '<div class="popup"><div class="pu-head">%s</div><div class="pu-body">%s</div></div>' % (
+                esc(popups[pid]['title']), popups[pid]['html'])
+    return out
 
 
 def h_el(e, popups):
@@ -848,7 +984,12 @@ def h_el(e, popups):
                     extra += box
         return '<div class="block">%s</div>%s' % (h, extra)
     if k == 'image':
-        return h_image(e)
+        h = h_image(e)
+        boxes = popup_boxes(h, popups)   # pop-uplink in het bijschrift ('Klik hier voor de toelichting')
+        if boxes and DEFER and DEFER[-1] is not None:
+            DEFER[-1].append(boxes)
+            return h
+        return h + boxes
     if k == 'textimage':
         return e['html']
     if k == 'table':
@@ -863,10 +1004,32 @@ def h_el(e, popups):
         if bl and bl[0][0] == 'p' and len(plain(bl[0][1])) <= 60 and len(bl) > 1:
             head = '<div class="pu-head">%s</div>' % re.sub(r'</?strong>', '', bl[0][1])
             bl = bl[1:]
+        ic = ''
+        if e.get('icon'):
+            try:
+                from PIL import Image
+                iw, ih = Image.open(io.BytesIO(base64.b64decode(e['icon'].split(',', 1)[1]))).size
+            except Exception:
+                iw = ih = 0
+            if max(iw, ih) >= 100:
+                # foto waarop je klikt: tonen, met de tekst van de pop-up eronder
+                return '<figure class="sp-trigger"><img src="%s" alt=""></figure><div class="popup">%s<div class="pu-body">%s</div></div>' % (
+                    e['icon'], head, blocks_html(bl))
+            ic = '<img class="pu-icon" src="%s" alt="">' % e['icon']   # klein klikpictogram (nummer, hotspot)
+            head = '<div class="pu-head">%s%s</div>' % (ic, head[len('<div class="pu-head">'):-len('</div>')]) if head else '<div class="pu-head">%s</div>' % ic
         return '<div class="popup">%s<div class="pu-body">%s</div></div>' % (head, blocks_html(bl))
     if k == 'carousel':
-        figs = ''.join('<figure><img src="%s" alt=""></figure>' % d for d in e['data'] if d)
-        return '<div class="sp-carousel">%s</div>' % figs
+        figs = []
+        for sl in e['slides']:
+            cap = ''
+            if norm(sl['title']):
+                cap += '<strong>%s</strong>' % esc(norm(sl['title']))
+            if norm(sl['descr']):
+                cap += ''.join('<span class="cd">%s</span>' % esc(l.strip()) for l in sl['descr'].split('\n') if l.strip())
+            img = '<img src="%s" alt="">' % sl['data'] if sl['data'] else ''
+            if img or cap:
+                figs.append('<figure>%s%s</figure>' % (img, '<figcaption>%s</figcaption>' % cap if cap else ''))
+        return '<div class="sp-carousel">%s</div>' % ''.join(figs)
     if k == 'youtube':
         th = YT_THUMBS.get(e['vid'])
         url = 'https://www.youtube.com/watch?v=' + e['vid']
@@ -893,13 +1056,23 @@ def h_el(e, popups):
 
 
 CSS_EXTRA = """
+.sp figure.sp-trigger { margin: .6em 0 .2em; }
+.sp figure.sp-trigger img { max-height: 60mm; width: auto; max-width: 100%; }
+.sp .popup img.pu-icon { height: 1.3em; width: auto; vertical-align: -.25em; margin-right: .4em; }
+.sp .sp-carousel figure { margin: 0; break-inside: avoid; }
+.sp .sp-carousel figcaption strong { display: block; color: #222; }
+.sp .sp-carousel figcaption .cd { display: block; color: #333; }
+.sp .quiz .opt-imgs { display: block; margin: .3em 0 .2em; }
+.sp .quiz img.qti-img { max-height: 45mm; max-width: 100%; width: auto; margin: .2em .4em .2em 0; vertical-align: top; }
+.sp .quiz ol.sp-order { margin: .35em 0 0; padding-left: 1.4em; }
+.sp .quiz ol.sp-order li { margin: 0 0 .2em; }
 .sp figure.sp-zoom img { max-height: 120mm; width: auto; max-width: 100%; }
 .sp .popup { break-inside: avoid; }
 .sp table.sp-table { border-collapse: collapse; width: 100%; font-size: 9.2pt; margin: .3em 0 1em; }
 .sp table.sp-table td { border: 1px solid #777; padding: .3em .5em; vertical-align: top; }
 .sp table.sp-table p { margin: 0 0 .25em; }
 .sp .sp-carousel { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm; margin: .4em 0 1em; }
-.sp .sp-carousel img { width: 100%; height: auto; max-height: 55mm; object-fit: cover; }
+.sp .sp-carousel img { display: block; max-width: 100%; width: auto; height: auto; max-height: 70mm; object-fit: contain; }
 .sp .popup .pu-img img { max-height: 55mm; width: auto; max-width: 100%; }
 .sp figure.sp-video { margin: .5em 0 1em; max-width: 120mm; break-inside: avoid; }
 .sp .sp-vthumb { position: relative; display: inline-block; line-height: 0; border-radius: 4px; overflow: hidden; }
@@ -950,6 +1123,13 @@ def build(dump):
             # zelfde opmaak als een gewone pagina (tekst links, afbeeldingen rechts), alle soorten elementen
             parts = [h_el(x, {}) for x in layout(its)]
             popups[pid] = {'title': hp['title'], 'html': ''.join(parts)}
+    # pop-up die zelf weer naar een pop-up linkt (bijv. 'Klik hier voor de toelichting' in een pop-up): erin opnemen
+    for pid, v in list(popups.items()):
+        for qid in re.findall(r'data-page="([^"]+)"', v['html']):
+            if qid != pid and qid in popups and qid not in v.get('nested', ()):
+                v.setdefault('nested', set()).add(qid)
+                v['html'] += '<div class="popup"><div class="pu-head">%s</div><div class="pu-body">%s</div></div>' % (
+                    esc(popups[qid]['title']), popups[qid]['html'])
     for v in popups.values():
         v.pop('shown', None)   # pop-ups binnen pop-ups opnieuw beschikbaar voor de pagina's
     # bijlagen nummeren in leesvolgorde (eerste vermelding in de cursus)
@@ -981,7 +1161,7 @@ def build(dump):
         for e in els:
             if e['kind'] == 'label':
                 e['skip'] = e['text'].lower() == tnorm or (tnorm and e['text'].lower().startswith(tnorm) and False)
-                if not e['skip'] and e['y'] < 40:
+                if not e['skip'] and e['y'] < 40 and tnorm and norm(e['text']).lower().startswith(tnorm):
                     p = dict(p, title=e['text'])   # bijv. 'Oorzaken' -> 'Oorzaken van stoornissen in de vitale functies'
                     e['skip'] = True
         els = [e for e in els if not (e['kind'] == 'label' and e.get('skip'))]

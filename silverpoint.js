@@ -69,8 +69,11 @@ function silverpointInstallHelpers() {
     };
     for (const [k, v] of Object.entries(od)) {
       if (!/^(Pages|HiddenPages|MasterPages)\//.test(k)) continue;
-      const txt = v.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-      (txt.match(/(?:Source|data)="(Resources\/[^"]+)"/g) || []).forEach((m) => add(m.replace(/^[a-zA-Z]+="/, '').replace(/"$/, '')));
+      // Meerdere keren ontsleutelen: carrousels (ItemsXML) en vragen (QTIXML) zitten dubbel geëscaped in de XAML
+      let txt = v;
+      for (let n = 0; n < 3; n++) txt = txt.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+      // Elke verwijzing naar een bestand in Resources/, waar die ook staat (Source, data, src, source, ItemsXML, QTI ...)
+      (txt.match(/Resources\/[^"'<>\n]+?\.(?:png|jpe?g|gif|svg|bmp|webp|mp4|webm|m4v|mov|mp3|wav|pdf)/gi) || []).forEach(add);
       (txt.match(/(?:Link|NavigateUri)="((?:int|rsc):\/\/[^"]+)"/g) || []).forEach((m) => add(m.replace(/^[a-zA-Z]+="/, '').replace(/"$/, '')));
     }
     const images = {};
