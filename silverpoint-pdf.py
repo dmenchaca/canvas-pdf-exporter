@@ -665,6 +665,8 @@ def h_el(e, popups):
 
 
 CSS_EXTRA = """
+.sp .quiz .answer p + p, .sp .quiz .answer ul, .sp .quiz .answer ol { display: block; margin: .45em 0 0; }
+.sp .quiz .answer ul, .sp .quiz .answer ol { padding-left: 1.3em; }
 .sp .sp-textimage { padding: .6em .9em; border-radius: 4px; margin: .4em 0 1em; }
 .sp .sp-textimage p { margin: 0 0 .35em; }
 .sp .gm-board { position: relative; width: 100%; max-width: 150mm; border: 1px solid #111; margin: .4em 0 .2em; break-inside: avoid; }
