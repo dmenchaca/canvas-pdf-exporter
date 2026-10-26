@@ -120,6 +120,7 @@ class Attachments:
 
 ATT = Attachments()
 POPUPS = {}  # verborgen pagina's (id -> titel/html), gevuld in build()
+DEFER = []   # pop-ups uit een smalle kolom: komen onder de kolommen, op volle breedte
 YT_THUMBS = {}  # YouTube-id -> miniatuur
 THUMBS = {}  # video-bestand -> miniatuur (data-URL) uit de dump
 
@@ -432,6 +433,12 @@ def image_as_text(images, src):
         small = im if im.width <= 1200 else im.resize((1200, int(im.height * 1200 / im.width)))
         ls = ocr_lines(small, 2)
         if not ls or not text_only(small, ls):
+            return None
+        # alleen als twee leesrondes (andere vergroting) woord voor woord gelijk zijn; anders blijft het een
+        # afbeelding, zodat de tekst nooit verandert door een leesfout
+        ls3 = ocr_lines(small, 3)
+        if [l['t'].split() for l in ls3] != [l['t'].split() for l in ls]:
+            print('afbeelding blijft afbeelding (tekst niet zeker):', src)
             return None
         a = np.asarray(small).astype(int)
         bgc = np.median(a.reshape(-1, 3), axis=0)
@@ -783,7 +790,11 @@ def h_image(e):
             return ''.join('<figure class="sp-zoom"><img src="%s" alt="">%s</figure>' % (b, cap if i == 0 else '') for i, b in enumerate(big))
         img = ('<figure><img src="%s" alt="">%s</figure>' % (e['data'], cap)) if e.get('data') else \
             ''.join('<div class="block">%s</div>' % blocks_html(c['blocks']) for c in e.get('caption', []))
-        return img + '<div class="popup"><div class="pu-head">%s</div><div class="pu-body">%s</div></div>' % (esc(pu['title']), pu['html'])
+        box = '<div class="popup"><div class="pu-head">%s</div><div class="pu-body">%s</div></div>' % (esc(pu['title']), pu['html'])
+        if DEFER and DEFER[-1] is not None:
+            DEFER[-1].append(box)
+            return img
+        return img + box
     if not e.get('data'):
         # pictogram zonder afbeelding (bijlage): alleen het bijschrift, als gewone tekst
         return ''.join('<div class="block">%s</div>' % blocks_html(c['blocks']) for c in e.get('caption', []))
@@ -799,8 +810,12 @@ def h_el(e, popups):
         for pid in re.findall(r'data-page="([^"]+)"', h):
             if pid in popups and not popups[pid].get('shown'):
                 popups[pid]['shown'] = True
-                extra += '<div class="popup"><div class="pu-head">%s</div><div class="pu-body">%s</div></div>' % (
+                box = '<div class="popup"><div class="pu-head">%s</div><div class="pu-body">%s</div></div>' % (
                     esc(popups[pid]['title']), popups[pid]['html'])
+                if DEFER and DEFER[-1] is not None:
+                    DEFER[-1].append(box)
+                else:
+                    extra += box
         return '<div class="block">%s</div>%s' % (h, extra)
     if k == 'image':
         return h_image(e)
@@ -839,9 +854,11 @@ def h_el(e, popups):
     if k == 'quiz':
         return h_quiz(e)
     if k == 'aside':
+        DEFER.append([])
         L = ''.join(h_el(x, popups) for x in e['left'])
         R = ''.join(h_el(x, popups) for x in e['right'])
-        return '<div class="sp-aside"><div class="sp-text">%s</div><div class="sp-media">%s</div></div>' % (L, R)
+        boxes = DEFER.pop()
+        return '<div class="sp-aside"><div class="sp-text">%s</div><div class="sp-media">%s</div></div>%s' % (L, R, ''.join(boxes))
     return ''
 
 
@@ -900,17 +917,11 @@ def build(dump):
         src = files.get(hp['src'])
         if src:
             its = page_items(src, images, {})
-            parts = []
-            for e in sorted(its, key=lambda e: (e['y'], e['x'])):
-                if e['kind'] == 'text':
-                    parts.append(blocks_html(e['blocks']))
-                elif e['kind'] == 'image' and e.get('data'):
-                    parts.append('<figure class="pu-img"><img src="%s" alt=""></figure>' % e['data'])
-                elif e['kind'] == 'table':
-                    parts.append(e['html'])
-                elif e['kind'] == 'video':
-                    parts.append(h_el(e, {}))
+            # zelfde opmaak als een gewone pagina (tekst links, afbeeldingen rechts), alle soorten elementen
+            parts = [h_el(x, {}) for x in layout(its)]
             popups[pid] = {'title': hp['title'], 'html': ''.join(parts)}
+    for v in popups.values():
+        v.pop('shown', None)   # pop-ups binnen pop-ups opnieuw beschikbaar voor de pagina's
     # bijlagen nummeren in leesvolgorde (eerste vermelding in de cursus)
     for p in pages:
         src = files.get(p['src']) or ''
