@@ -423,6 +423,24 @@ def gapmatch_html(gg, pairs, images):
 TEXT_IMAGES = [True]
 
 
+def text_agrees(w, tes, other):
+    """Elk woord van de Vision-lezing w staat ook (zelfde letters en cijfers, zelfde volgorde) in de Tesseract-lezing;
+    verschilt alleen hoofdletter of leesteken, dan moet de andere Vision-lezing het woord precies zo lezen."""
+    import difflib
+    if not w:
+        return False
+    key = lambda x: re.sub(r'\W', '', x).lower()
+    sm = difflib.SequenceMatcher(None, [key(x) for x in w], [key(x) for x in tes], autojunk=False)
+    if any(op != 'equal' for op, *_ in sm.get_opcodes()):
+        return False
+    same = set()
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, w, other, autojunk=False).get_opcodes():
+        if op == 'equal':
+            same.update(range(i1, i2))
+    tw = [x for x in tes]
+    return all(w[i] == tw[i] or i in same for i in range(len(w)))
+
+
 def image_as_text(images, src):
     """Regel: een afbeelding die alleen tekst op een effen achtergrond is, wordt echte tekst (in de eigen kleuren)."""
     try:
@@ -431,27 +449,39 @@ def image_as_text(images, src):
         if im is None or im.width * im.height < 2000:
             return None
         small = im if im.width <= 1200 else im.resize((1200, int(im.height * 1200 / im.width)))
-        ls = ocr_lines(small, 2)
+        # Drie onafhankelijke lezingen (Vision op 2x en 3x, Tesseract): de tekst wordt alleen echte tekst als
+        # een Vision-lezing woord voor woord gelijk is aan een andere lezing; anders blijft het een afbeelding,
+        # zodat de tekst nooit verandert door een leesfout
+        from PIL import Image
+        reads = [ocr_lines(small, 2), ocr_lines(small, 3)]
+        wl = lambda t: [w for w in t.split() if re.search(r'\w', w)]   # losse tekens (pictogram als '€') tellen niet
+        words = [wl(' '.join(l['t'] for l in r)) for r in reads]
+        T = tools()
+        tes = wl(T.tesseract(small.resize((small.width * 3, small.height * 3), Image.LANCZOS)))
+        ls = next((r for r, w, o in [(reads[1], words[1], words[0]), (reads[0], words[0], words[1])]
+                   if text_agrees(w, tes, o)), None)
         if not ls or not text_only(small, ls):
-            return None
-        # alleen als twee leesrondes (andere vergroting) woord voor woord gelijk zijn; anders blijft het een
-        # afbeelding, zodat de tekst nooit verandert door een leesfout
-        ls3 = ocr_lines(small, 3)
-        if [l['t'].split() for l in ls3] != [l['t'].split() for l in ls]:
-            print('afbeelding blijft afbeelding (tekst niet zeker):', src)
+            if ls is None and reads[0]:
+                print('afbeelding blijft afbeelding (tekst niet zeker):', src)
             return None
         a = np.asarray(small).astype(int)
         bgc = np.median(a.reshape(-1, 3), axis=0)
         mask = np.abs(a - bgc).sum(2) > 150
         ink = np.median(a[mask].reshape(-1, 3), axis=0) if mask.any() else np.array([0, 0, 0])
+        # vette regels (duidelijk meer inkt dan de rest) = kop: vet, op een eigen regel
+        g = np.asarray(small.convert('L')).astype(int)
+        dens = [(g[int(l['y']):int(l['y'] + l['h']) + 1, int(l['x']):int(l['x'] + l['w']) + 1] < 110).mean() for l in ls]
+        md = sorted(dens)[len(dens) // 2]
+        for l, dn in zip(ls, dens):
+            l['bold'] = len(ls) > 2 and dn > 1.2 * md
         rows, cur = [], []
-        for l in ls:   # regels met een duidelijke witregel ertussen = nieuwe alinea
-            if cur and l['y'] - (cur[-1]['y'] + cur[-1]['h']) > 0.8 * l['h']:
+        for l in ls:   # regels met een duidelijke witregel ertussen = nieuwe alinea; vet <-> niet vet ook
+            if cur and (l['y'] - (cur[-1]['y'] + cur[-1]['h']) > 0.8 * l['h'] or l['bold'] or cur[-1]['bold']):
                 rows.append(cur)
                 cur = []
             cur.append(l)
         rows.append(cur)
-        body = ''.join('<p>%s</p>' % esc(' '.join(l['t'] for l in r)) for r in rows)
+        body = ''.join(('<p><strong>%s</strong></p>' if r[0]['bold'] else '<p>%s</p>') % esc(' '.join(l['t'] for l in r)) for r in rows)
         return '<div class="sp-textimage" style="background:#%02x%02x%02x;color:#%02x%02x%02x">%s</div>' % (
             tuple(int(v) for v in bgc) + tuple(int(v) for v in ink) + (body,))
     except Exception as e:
