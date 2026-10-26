@@ -242,8 +242,27 @@ def explanation(fb):
     return ''   # alleen lof ('Goed.', 'Correct!')
 
 
+def dedupe_attrs(x):
+    """Dubbel attribuut in één tag (komt voor in de bron) weglaten; anders is de XML ongeldig."""
+    def fix(m):
+        seen = set()
+
+        def one(a):
+            k = a.group(1)
+            if k in seen:
+                return ''
+            seen.add(k)
+            return a.group(0)
+        return re.sub(r'\s([\w:.-]+)="[^"]*"', one, m.group(0))
+    return re.sub(r'<[\w:.-]+(?:\s[^<>]*?)?/?>', fix, x)
+
+
 def build_question(qxml, images):
-    root = ET.fromstring(qxml)
+    try:
+        root = ET.fromstring(qxml)
+    except ET.ParseError:
+        qxml = dedupe_attrs(qxml)
+        root = ET.fromstring(qxml)
     body = root.find(QTI + 'itemBody')
     fb = {m.get('identifier'): qti_html(m, images) for m in root.iter(QTI + 'modalFeedback')}   # met afbeeldingen uit het pakket
     q = {'kind': 'quiz', 'title': root.get('title') or '', 'explanation': explanation(fb), 'type': ''}
@@ -291,6 +310,8 @@ def build_question(qxml, images):
                 labels[gi.get('identifier')] = lab
         used = {p.split()[0] for p in pairs if p.split()}
         q['labels'] = [l for i, l in labels.items() if i in used]
+        # labels die zelf een afbeelding zijn (vaak tekst in een plaatje): oplossing op volle breedte
+        q['image_labels'] = any((o.get('data') or '').startswith('Resources/') for gi in gg.iter(QTI + 'gapImg') for o in gi.iter(QTI + 'object'))
         q['unused'] = [l for i, l in labels.items() if i not in used]
         q['solution_html'] = gapmatch_html(gg, pairs, images)   # echte tekst als dat kan
         if not q['solution_html']:
@@ -427,8 +448,7 @@ def gapmatch_html(gg, pairs, images):
         gaps = {g.get('identifier'): g.find(QTI + 'object') for g in gg.iter(QTI + 'gapImg')}
         spots = [(h.get('identifier'), [float(x) for x in (h.get('coords') or '0,0,0,0').split(',')]) for h in gg.iter(QTI + 'associableHotspot')]
         answer = {}
-        for p in pairs:
-            g, h = (p.split() + ['', ''])[:2]
+        for g, h in assign_pairs(pairs):
             answer.setdefault(h, []).append(g)
         cells = []
         for hid, c in spots:
@@ -595,6 +615,41 @@ def selectpoint_image(sp, root, images):
         return None
 
 
+def assign_pairs(pairs, label_order=None, slot_key=None):
+    """Antwoordsleutel met alternatieven (label mag in meerdere vakken): elk label precies één vak,
+    elk vak hoogstens één label (koppeling). Zonder alternatieven blijft de sleutel zoals hij is."""
+    edges = [tuple((p.split() + ['', ''])[:2]) for p in pairs]
+    labels = list(dict.fromkeys(g for g, _ in edges))
+    if len(edges) == len(labels):
+        return edges
+    opts = {g: [h for gg_, h in edges if gg_ == g] for g in labels}
+    owner = {}
+
+    def take(g, seen):
+        for h in opts[g]:
+            if h in seen:
+                continue
+            seen.add(h)
+            if h not in owner or take(owner[h], seen):
+                owner[h] = g
+                return True
+        return False
+    for g in labels:
+        take(g, set())
+    got = {g: h for h, g in owner.items()}
+    # uitwisselbare labels (zelfde toegestane vakken): in hun eigen volgorde van boven naar beneden
+    if slot_key:
+        lo = label_order or labels
+        groups = {}
+        for g in got:
+            groups.setdefault(frozenset(opts[g]), []).append(g)
+        for gs in groups.values():
+            slots = sorted((got[g] for g in gs), key=slot_key)
+            for g, h in zip(sorted(gs, key=lambda x: lo.index(x) if x in lo else 0), slots):
+                got[g] = h
+    return [(g, got[g]) for g in labels if g in got]
+
+
 def gapmatch_image(gg, pairs, images):
     """Sleepvraag met afbeeldingen: de juiste plaatjes op hun plek getekend (Pillow)."""
     try:
@@ -616,8 +671,9 @@ def gapmatch_image(gg, pairs, images):
     sx, sy = base.width / (W or base.width), base.height / (H or base.height)
     gaps = {g.get('identifier'): g.find(QTI + 'object') for g in gg.iter(QTI + 'gapImg')}
     spots = {h.get('identifier'): [float(x) for x in (h.get('coords') or '0,0,0,0').split(',')] for h in gg.iter(QTI + 'associableHotspot')}
-    for p in pairs:
-        g, h = (p.split() + ['', ''])[:2]
+    nexty = {}   # meerdere labels in hetzelfde vak: onder elkaar, niet over elkaar
+    order = [g.get('identifier') for g in gg.iter(QTI + 'gapImg')]
+    for g, h in assign_pairs(pairs, order, lambda h: (spots.get(h, [0, 0])[1], spots.get(h, [0, 0])[0])):
         obj, c = gaps.get(g), spots.get(h)
         if obj is None or not c:
             continue
@@ -627,9 +683,15 @@ def gapmatch_image(gg, pairs, images):
         w, hgt = float(obj.get('width') or im.width), float(obj.get('height') or im.height)
         im = im.resize((max(1, int(w * sx)), max(1, int(hgt * sy))))
         # zoals in de speler: linksboven in het vak, zonder kader; de vaktitel (midden) blijft vrij
-        pad = 6
-        x0, y0 = int((c[0] + pad) * sx), int((c[1] + pad) * sy)
-        base.alpha_composite(im, (x0, y0))
+        # vak met een titel (groter dan het label): linksboven met wat ruimte; vak op maat van het label: precies erin
+        pad = 6 if (c[3] - c[1]) > 1.6 * hgt else 0
+        x0 = int((c[0] + pad) * sx)
+        y0 = nexty.get(h, int((c[1] + pad) * sy))
+        nexty[h] = y0 + im.height + max(2, int(3 * sy))
+        if y0 + im.height <= base.height and x0 + im.width <= base.width:
+            base.alpha_composite(im, (x0, y0))
+        else:
+            base.alpha_composite(im.crop((0, 0, min(im.width, base.width - x0), min(im.height, base.height - y0))), (x0, y0))
     buf = io.BytesIO()
     base.convert('RGB').save(buf, 'JPEG', quality=88)
     return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
@@ -804,15 +866,34 @@ def page_items(xaml, images, hidden_pages):
                     els.append({'kind': 'textimage', 'x': x, 'y': y, 'w': w, 'h': hh, 'html': tb, 'link': link})
                     src = ''
                     link = None   # al verwerkt (de link gaat mee met de tekst)
+            # klikbare gebieden in de afbeelding (TSHotspotImage): elk gebied opent een verborgen pagina
+            spots = []
+            ha = html.unescape(html.unescape(attr(el, 'HotspotAreas', '') or ''))
+            for sm in re.finditer(r'<(Rectangle|Polygon|Ellipse)>(.*?)</\1>', ha, re.S):
+                body = sm.group(2)
+                url = (re.search(r'<Url>([^<]*)</Url>', body) or [None, ''])[1]
+                if not url.startswith('page://'):
+                    continue
+                if sm.group(1) == 'Polygon':
+                    pts = [(float(a), float(b)) for a, b in re.findall(r'<X>([-\d.]+)</X>\s*<Y>([-\d.]+)</Y>', body)]
+                    cx, cy = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+                else:
+                    g = lambda t: float((re.search(r'<%s>([-\d.]+)</%s>' % (t, t), body) or [0, 0])[1])
+                    cx, cy = g('Left') + g('Width') / 2, g('Top') + g('Height') / 2
+                spots.append({'pid': url[7:].split('/')[0], 'cx': cx, 'cy': cy})
             if src or link:
                 els.append({'kind': 'image', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': src, 'data': images.get(src, ''), 'link': link,
-                            'popup': popup})
+                            'popup': popup, 'spots': spots})
             # pictogram op de pagina dat een andere afbeelding is dan de vergroting: beide tonen
             ic = attr(el, 'IconSource', '') or ''
             if ic and ic != src and images.get(ic):
                 els.append({'kind': 'image', 'x': x, 'y': y - 0.5, 'w': w, 'h': hh, 'src': ic, 'data': images[ic], 'link': None, 'popup': False})
         elif t == 'MediaPlayer':
-            els.append({'kind': 'video', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': attr(el, 'Source', '')})
+            msrc = attr(el, 'Source', '') or ''
+            if (attr(el, 'MediaType', '') or '').lower() == 'audio' or re.search(r'\.(mp3|wav|m4a)$', msrc, re.I):
+                els.append({'kind': 'audio', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': msrc})
+            else:
+                els.append({'kind': 'video', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': msrc})
         elif t == 'Question':
             qx = attr(el, 'QTIXML', '')
             if qx:
@@ -913,7 +994,8 @@ def h_quiz(q):
             out.append('<figure class="solution">%s<figcaption>Juiste oplossing</figcaption></figure>' % q['solution_html'])
         elif q.get('solution'):
             lab = (': ' + ', '.join(esc(l) for l in q['labels'])) if q.get('labels') else ''
-            out.append('<figure class="solution"><img src="%s" alt=""><figcaption>Juiste oplossing%s</figcaption></figure>' % (q['solution'], lab))
+            out.append('<figure class="solution%s"><img src="%s" alt=""><figcaption>Juiste oplossing%s</figcaption></figure>' % (
+                ' wide' if q.get('image_labels') else '', q['solution'], lab))
         if q.get('unused'):
             out.append('<div class="answer"><span class="answer-label">Hoort nergens bij:</span> %s</div>' % ', '.join(esc(l) for l in q['unused']))
     elif q['type'] == 'order':
@@ -938,7 +1020,57 @@ def h_quiz(q):
     return ''.join(out)
 
 
+def spots_image(e):
+    """Afbeelding met genummerde markeringen op de klikbare gebieden; nummer per verborgen pagina."""
+    from PIL import Image, ImageDraw, ImageFont
+    im = Image.open(io.BytesIO(base64.b64decode(e['data'].split(',', 1)[1]))).convert('RGB')
+    sx = im.width / (e['w'] or im.width)
+    sy = im.height / (e['h'] or im.height) if e.get('h') else sx
+    order = []
+    for sp in sorted(e['spots'], key=lambda s: (round(s['cy'] / 25), s['cx'])):
+        if sp['pid'] not in order:
+            order.append(sp['pid'])
+    # nummer uit de titel van de pop-up ('Hotspot 4: Trap') gaat voor; anders de leesvolgorde
+    def num(pid):
+        m = re.search(r'\b(\d+)\b', (POPUPS.get(pid) or {}).get('title', ''))
+        return int(m.group(1)) if m else None
+    if all(num(p) is not None for p in order) and len({num(p) for p in order}) == len(order):
+        order.sort(key=num)
+        label = {p: num(p) for p in order}
+    else:
+        label = {p: i + 1 for i, p in enumerate(order)}
+    d = ImageDraw.Draw(im)
+    r = max(11, int(im.width * 0.028))
+    try:
+        font = ImageFont.truetype('/System/Library/Fonts/Supplemental/Arial Bold.ttf', int(r * 1.25))
+    except Exception:
+        font = ImageFont.load_default()
+    for sp in e['spots']:
+        n = label[sp['pid']]
+        cx, cy = sp['cx'] * sx, sp['cy'] * sy
+        d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(186, 65, 51), outline=(255, 255, 255), width=max(2, r // 6))
+        d.text((cx, cy), str(n), fill=(255, 255, 255), font=font, anchor='mm')
+    buf = io.BytesIO()
+    im.save(buf, 'JPEG', quality=88)
+    return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode(), [(p, label[p]) for p in order]
+
+
 def h_image(e):
+    if e.get('spots') and e.get('data'):
+        data, order = spots_image(e)
+        cap = ''.join('<figcaption>%s</figcaption>' % blocks_html(c['blocks']) for c in e.get('caption', []))
+        boxes = ''
+        for pid, i in order:
+            pu = POPUPS.get(pid)
+            if pu:
+                pu['shown'] = True
+                boxes += '<div class="popup"><div class="pu-head"><span class="pu-num">%d</span>%s</div><div class="pu-body">%s</div></div>' % (
+                    i, esc(pu['title']), pu['html'])
+        img = '<figure><img src="%s" alt="">%s</figure>' % (data, cap)
+        if boxes and DEFER and DEFER[-1] is not None:
+            DEFER[-1].append(boxes)
+            return img
+        return img + boxes
     att = attachment_key(e.get('link') or '')
     if att and ATT.data.get(att):
         # pictogram van een bijlage: als link naar de bijlage achteraan
@@ -1069,6 +1201,9 @@ def h_el(e, popups):
                     '<figcaption>&#9654; Video in de e-module%s &ndash; bekijk deze video in de e-module.</figcaption></figure>') % (
                 th, (': <strong>%s</strong>' % esc(name)) if name else '')
         return '<p class="note">[Video in de e-module%s]</p>' % (': ' + esc(name) if name else '')
+    if k == 'audio':
+        name = os.path.splitext(os.path.basename(e.get('src') or ''))[0]
+        return '<p class="sp-audio">&#128266; Audiofragment in de e-module: <strong>%s</strong> &ndash; beluister dit fragment in de e-module.</p>' % esc(name)
     if k == 'quiz':
         return h_quiz(e)
     if k == 'aside':
@@ -1081,6 +1216,9 @@ def h_el(e, popups):
 
 
 CSS_EXTRA = """
+.sp .quiz figure.solution.wide img { width: 100%; max-height: none; }
+.sp .sp-audio { margin: .5em 0 1em; padding: .5em .8em; border: 1px solid #d6d6d6; border-radius: 6px; background: #f7f7f7; font-size: 9.5pt; }
+.sp .popup .pu-num { display: inline-block; min-width: 1.35em; height: 1.35em; line-height: 1.35em; border-radius: 50%; background: #ba4133; color: #fff; text-align: center; font-size: 9pt; margin-right: .45em; }
 .sp .sp-protocol { padding: 3mm 4mm; font-size: 9.6pt; line-height: 1.38; }
 .sp .sp-protocol p { margin: 0 0 .55em; }
 .sp table.sp-textimage { margin: .4em 0 1em; break-inside: avoid; }

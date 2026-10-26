@@ -81,7 +81,8 @@ EXPORTER_CHROME_LINES = [r"PDF-versie van de NIPV", r"gemaakt op \d+ \w+ \d{4}"]
 SCHEMA_URL_RE = re.compile(r"w3\.org/|imsglobal\.org/xsd|schemas\.microsoft\.com|schemas\.openxmlformats", re.I)
 HTTP_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.I)
 PAGE_RE = re.compile(r"page://([0-9a-fA-F-]{36})")
-IMG_RE = re.compile(r"Resources/[^\"<>|]*?\.(?:jpe?g|png|gif|bmp)", re.I)
+# extensie aan het eind van de naam: 'x.jpg.png' / 'x.jpg-1.png' niet afkappen na '.jpg'
+IMG_RE = re.compile(r"Resources/[^\"<>|]*?\.(?:jpe?g|png|gif|bmp)(?=[\"'<>\s)|]|$)", re.I)
 VID_EXT = (".mp4", ".flv", ".wmv", ".mov", ".m4v", ".webm", ".avi")
 AUD_EXT = (".mp3", ".wav", ".m4a", ".wma", ".ogg")
 
