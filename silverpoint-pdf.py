@@ -119,6 +119,9 @@ class Attachments:
 
 
 ATT = Attachments()
+POPUPS = {}  # verborgen pagina's (id -> titel/html), gevuld in build()
+YT_THUMBS = {}  # YouTube-id -> miniatuur
+THUMBS = {}  # video-bestand -> miniatuur (data-URL) uit de dump
 
 
 def children_of(el):
@@ -245,6 +248,11 @@ def build_question(qxml, images):
         q['solution_html'] = gapmatch_html(gg, pairs, images)   # echte tekst als dat kan
         if not q['solution_html']:
             q['solution'] = gapmatch_image(gg, pairs, images)
+        return q
+    sp = body.find('.//' + QTI + 'selectPointInteraction')
+    if sp is not None:
+        q['type'] = 'gapmatch'   # zelfde weergave: afbeelding met de juiste oplossing
+        q['solution'] = selectpoint_image(sp, root, images)
         return q
     if body.find('.//' + QTI + 'extendedTextInteraction') is not None:
         q['type'] = 'open'
@@ -451,6 +459,38 @@ def gap_field(t):
             'border-radius:2px;padding:0 .3em;white-space:nowrap">%s</span>') % esc(t)
 
 
+def selectpoint_image(sp, root, images):
+    """Aanwijsvraag: de juiste plek(ken) als groene cirkel op de afbeelding."""
+    try:
+        from PIL import ImageDraw
+        obj = sp.find(QTI + 'object')
+        im = img_of(images, obj.get('data'))
+        if im is None:
+            return None
+        W, H = float(obj.get('width') or im.width), float(obj.get('height') or im.height)
+        sx, sy = im.width / W, im.height / H
+        dr = ImageDraw.Draw(im)
+        for a in root.iter(QTI + 'areaMapEntry'):
+            if float(a.get('mappedValue') or 0) <= 0:
+                continue
+            c = [float(v) for v in (a.get('coords') or '').split(',') if v.strip()]
+            lw = max(3, int(min(im.width, im.height) / 70))
+            if a.get('shape') == 'circle' and len(c) >= 3:
+                x, y, r = c[0] * sx, c[1] * sy, max(c[2] * sx, 10)
+                dr.ellipse([x - r, y - r, x + r, y + r], outline=(29, 160, 70), width=lw)
+            elif a.get('shape') == 'rect' and len(c) >= 4:
+                dr.rectangle([c[0] * sx, c[1] * sy, c[2] * sx, c[3] * sy], outline=(29, 160, 70), width=lw)
+            elif a.get('shape') == 'poly' and len(c) >= 6:
+                pts = [(c[i] * sx, c[i + 1] * sy) for i in range(0, len(c) - 1, 2)]
+                dr.line(pts + [pts[0]], fill=(29, 160, 70), width=lw)
+        buf = io.BytesIO()
+        im.save(buf, 'JPEG', quality=88)
+        return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        print('aanwijsvraag:', e)
+        return None
+
+
 def gapmatch_image(gg, pairs, images):
     """Sleepvraag met afbeeldingen: de juiste plaatjes op hun plek getekend (Pillow)."""
     try:
@@ -493,17 +533,118 @@ def gapmatch_image(gg, pairs, images):
 
 # ----------------------------------------------------------------------------- pagina's
 
+def html_blocks(h):
+    """htmlcontent (p/span-HTML) -> blokken."""
+    out = []
+    for m in re.finditer(r'<(p|li)\b[^>]*>(.*?)</\1>', h, re.S):
+        inner = m.group(2)
+        inner = re.sub(r'<span[^>]*font-weight:\s*bold[^>]*>(.*?)</span>', r'<strong>\1</strong>', inner, flags=re.S)
+        inner = re.sub(r'<span[^>]*font-style:\s*italic[^>]*>(.*?)</span>', r'<em>\1</em>', inner, flags=re.S)
+        inner = re.sub(r'<(?!/?(strong|em|br|a)\b)[^>]+>', '', inner)
+        inner = re.sub(r'\s(class|style)="[^"]*"', '', inner).strip()
+        if plain(inner):
+            if m.group(1) == 'li' and out and out[-1][0] == 'ul':
+                out[-1][1].append(inner)
+            elif m.group(1) == 'li':
+                out.append(('ul', [inner]))
+            else:
+                out.append(('p', inner))
+    return out
+
+
+def table3_html(el):
+    """Table3 (Grid met RichTextBox-cellen, elk met Xaml) -> HTML-tabel."""
+    cells = {}
+    for b in el.iter():
+        if local(b.tag) != 'Border':
+            continue
+        r, c = int(attr(b, 'Row', '0') or 0), int(attr(b, 'Column', '0') or 0)
+        rtb = next((x for x in b.iter() if local(x.tag) == 'RichTextBox'), None)
+        xa = html.unescape(attr(rtb, 'Xaml', '') or '') if rtb is not None else ''
+        paras = []
+        for pm in re.finditer(r'<Paragraph\b[^>]*>(.*?)</Paragraph>', xa, re.S):
+            runs = []
+            for rm in re.finditer(r'<Run\b([^>]*)Text="([^"]*)"', pm.group(1)):
+                t = esc(html.unescape(rm.group(2)))
+                if re.search(r'FontWeight="Bold"', rm.group(1)):
+                    t = '<strong>%s</strong>' % t
+                runs.append(t)
+            if plain(''.join(runs)):
+                paras.append(''.join(runs))
+        cells[(r, c)] = ''.join('<p>%s</p>' % x for x in paras)
+    if not cells:
+        return ''
+    R = max(r for r, c in cells) + 1
+    C = max(c for r, c in cells) + 1
+    rows = ''.join('<tr>%s</tr>' % ''.join('<td>%s</td>' % cells.get((r, c), '') for c in range(C)) for r in range(R))
+    return '<table class="sp-table">%s</table>' % rows
+
+
 def page_items(xaml, images, hidden_pages):
     root = parse_xaml(xaml)
     els = []
+    inner = set()   # elementen binnen een TSRichTextBox/Table3 niet nog eens apart lezen
+    for el in root.iter():
+        if local(el.tag) in ('TSRichTextBox', 'Table3', 'Question'):
+            for d in el.iter():
+                if d is not el:
+                    inner.add(id(d))
     for el in root.iter():
         t = local(el.tag)
+        if id(el) in inner:
+            continue
         x = float(attr(el, 'Left', '0') or 0) if attr(el, 'Left') not in (None, 'NaN') else 0.0
         y = float(attr(el, 'Top', '0') or 0) if attr(el, 'Top') not in (None, 'NaN') else 0.0
-        w = attr(el, 'Width', '0')
-        w = float(w) if w not in (None, 'NaN', '') else 0.0
-        hh = attr(el, 'Height', '0')
-        hh = float(hh) if hh not in (None, 'NaN', '') else 0.0
+        def num(v):
+            try:
+                f = float(v)
+                return 0.0 if f != f else f   # NaN -> 0
+            except (TypeError, ValueError):
+                return 0.0   # 'NaN', '49*' (kolombreedte in een raster)
+        w = num(attr(el, 'Width', '0'))
+        hh = num(attr(el, 'Height', '0'))
+        popup = (attr(el, 'IsPopup', '') or '').lower() == 'true'
+        if t == 'TSRichTextBox' and popup:
+            # tekst achter een klik-icoon (hotspot): als uitklapkader tonen
+            hc = html.unescape(attr(el, 'htmlcontent', '') or '')
+            bl = html_blocks(hc) if hc else []
+            if not bl:
+                doc = next((d for d in el.iter() if local(d.tag) == 'C1Document'), None)
+                bl = doc_blocks(doc) if doc is not None else []
+            if bl:
+                els.append({'kind': 'popupbox', 'x': x, 'y': y, 'w': w, 'h': hh, 'blocks': bl})
+            continue
+        if t == 'Table3':
+            els.append({'kind': 'table', 'x': x, 'y': y, 'w': w, 'h': hh, 'html': table3_html(el)})
+            continue
+        if t == 'Carousel':
+            items = re.findall(r'source="([^"]+)"', html.unescape(attr(el, 'ItemsXML', '') or ''))
+            els.append({'kind': 'carousel', 'x': x, 'y': y, 'w': w, 'h': hh, 'srcs': items, 'data': [images.get(u, '') for u in items]})
+            continue
+        if t == 'HtmlPlayer':
+            url = attr(el, 'DisplayName', '') or ''
+            m = re.search(r'youtube\.com/(?:v/|watch\?v=|embed/)([\w-]{6,})|youtu\.be/([\w-]{6,})', url)
+            if m:
+                vid = m.group(1) or m.group(2)
+                els.append({'kind': 'youtube', 'x': x, 'y': y, 'w': w, 'h': hh, 'vid': vid})
+            elif url:
+                els.append({'kind': 'note', 'x': x, 'y': y, 'w': w, 'h': hh, 'text': 'Webinhoud in de e-module: ' + url})
+            continue
+        if t == 'TextBlock':
+            tx = attr(el, 'Text', '') or ''
+            if tx and not tx.startswith('{') and norm(tx):
+                els.append({'kind': 'label', 'x': x, 'y': y, 'w': w, 'h': hh, 'text': norm(html.unescape(tx))})
+            continue
+        if t == 'C1RichTextBox':
+            # ouder formaat: losse C1RichTextBox op het canvas, tekst in htmlcontent of een C1Document
+            hc = html.unescape(attr(el, 'htmlcontent', '') or '')
+            doc = next((d for d in el.iter() if local(d.tag) == 'C1Document'), None)
+            bl = doc_blocks(doc) if doc is not None else []
+            if not bl and hc:
+                bl = html_blocks(hc)
+            if bl:
+                els.append({'kind': 'popupbox' if popup else 'text', 'x': x, 'y': y, 'w': w, 'h': hh, 'blocks': bl})
+            continue
         if t == 'TSRichTextBox':
             doc = next((d for d in el.iter() if local(d.tag) == 'C1Document'), None)
             rtb = next((d for d in el.iter() if local(d.tag) == 'C1RichTextBox'), None)
@@ -523,7 +664,8 @@ def page_items(xaml, images, hidden_pages):
                     els.append({'kind': 'textimage', 'x': x, 'y': y, 'w': w, 'h': hh, 'html': tb})
                     continue
             if src or link:
-                els.append({'kind': 'image', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': src, 'data': images.get(src, ''), 'link': link})
+                els.append({'kind': 'image', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': src, 'data': images.get(src, ''), 'link': link,
+                            'popup': popup})
         elif t == 'MediaPlayer':
             els.append({'kind': 'video', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': attr(el, 'Source', '')})
         elif t == 'Question':
@@ -630,6 +772,18 @@ def h_image(e):
         cap = ''.join('<p><a href="#%s">%s</a></p>' % (r, re.sub(r'</?p>', '', blocks_html(c['blocks']))) for c in e.get('caption', []))
         return '<div class="sp-attach"><a href="#%s">📄 Bijlage %s: %s</a>%s</div>' % (
             r, r.split('-')[1], esc(ATT.name(att)), cap)
+    pl = re.match(r'page://([\w-]+)', e.get('link') or '')
+    if pl and POPUPS.get(pl.group(1)) and not POPUPS[pl.group(1)].get('shown'):
+        pu = POPUPS[pl.group(1)]
+        pu['shown'] = True
+        cap = ''.join('<figcaption>%s</figcaption>' % blocks_html(c['blocks']) for c in e.get('caption', []))
+        if not plain(re.sub(r'<img[^>]*>', '', pu['html'])):
+            # pop-up zonder tekst = vergroting: alleen de grote afbeelding(en), met het bijschrift
+            big = re.findall(r'<img src="([^"]+)"', pu['html'])
+            return ''.join('<figure class="sp-zoom"><img src="%s" alt="">%s</figure>' % (b, cap if i == 0 else '') for i, b in enumerate(big))
+        img = ('<figure><img src="%s" alt="">%s</figure>' % (e['data'], cap)) if e.get('data') else \
+            ''.join('<div class="block">%s</div>' % blocks_html(c['blocks']) for c in e.get('caption', []))
+        return img + '<div class="popup"><div class="pu-head">%s</div><div class="pu-body">%s</div></div>' % (esc(pu['title']), pu['html'])
     if not e.get('data'):
         # pictogram zonder afbeelding (bijlage): alleen het bijschrift, als gewone tekst
         return ''.join('<div class="block">%s</div>' % blocks_html(c['blocks']) for c in e.get('caption', []))
@@ -652,8 +806,35 @@ def h_el(e, popups):
         return h_image(e)
     if k == 'textimage':
         return e['html']
+    if k == 'table':
+        return '<div class="block">%s</div>' % e['html']
+    if k == 'label':
+        return '<h4 class="sp-label">%s</h4>' % esc(e['text'])
+    if k == 'note':
+        return '<p class="note">[%s]</p>' % esc(e['text'])
+    if k == 'popupbox':
+        bl = list(e['blocks'])
+        head = ''
+        if bl and bl[0][0] == 'p' and len(plain(bl[0][1])) <= 60 and len(bl) > 1:
+            head = '<div class="pu-head">%s</div>' % re.sub(r'</?strong>', '', bl[0][1])
+            bl = bl[1:]
+        return '<div class="popup">%s<div class="pu-body">%s</div></div>' % (head, blocks_html(bl))
+    if k == 'carousel':
+        figs = ''.join('<figure><img src="%s" alt=""></figure>' % d for d in e['data'] if d)
+        return '<div class="sp-carousel">%s</div>' % figs
+    if k == 'youtube':
+        th = YT_THUMBS.get(e['vid'])
+        url = 'https://www.youtube.com/watch?v=' + e['vid']
+        img = ('<div class="sp-vthumb"><img src="%s" alt=""><span class="sp-play"></span></div>' % th) if th else ''
+        return ('<figure class="sp-video"><a href="%s">%s</a><figcaption>&#9654; Video (YouTube): <a href="%s">%s</a> '
+                '&ndash; bekijk deze video in de e-module.</figcaption></figure>') % (url, img, url, url)
     if k == 'video':
         name = os.path.splitext(os.path.basename(e.get('src') or ''))[0]
+        th = THUMBS.get(e.get('src') or '')
+        if th:
+            return ('<figure class="sp-video"><div class="sp-vthumb"><img src="%s" alt=""><span class="sp-play"></span></div>'
+                    '<figcaption>&#9654; Video in de e-module%s &ndash; bekijk deze video in de e-module.</figcaption></figure>') % (
+                th, (': <strong>%s</strong>' % esc(name)) if name else '')
         return '<p class="note">[Video in de e-module%s]</p>' % (': ' + esc(name) if name else '')
     if k == 'quiz':
         return h_quiz(e)
@@ -665,6 +846,20 @@ def h_el(e, popups):
 
 
 CSS_EXTRA = """
+.sp figure.sp-zoom img { max-height: 120mm; width: auto; max-width: 100%; }
+.sp .popup { break-inside: avoid; }
+.sp table.sp-table { border-collapse: collapse; width: 100%; font-size: 9.2pt; margin: .3em 0 1em; }
+.sp table.sp-table td { border: 1px solid #777; padding: .3em .5em; vertical-align: top; }
+.sp table.sp-table p { margin: 0 0 .25em; }
+.sp .sp-carousel { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm; margin: .4em 0 1em; }
+.sp .sp-carousel img { width: 100%; height: auto; max-height: 55mm; object-fit: cover; }
+.sp .popup .pu-img img { max-height: 55mm; width: auto; max-width: 100%; }
+.sp figure.sp-video { margin: .5em 0 1em; max-width: 120mm; break-inside: avoid; }
+.sp .sp-vthumb { position: relative; display: inline-block; line-height: 0; border-radius: 4px; overflow: hidden; }
+.sp .sp-vthumb img { max-height: 60mm; width: auto; max-width: 100%; display: block; }
+.sp .sp-play { position: absolute; left: 50%; top: 50%; width: 15mm; height: 15mm; margin: -7.5mm 0 0 -7.5mm; border-radius: 50%; background: rgba(0,0,0,.55); }
+.sp .sp-play::after { content: ""; position: absolute; left: 5.8mm; top: 4mm; border-style: solid; border-width: 3.5mm 0 3.5mm 5.6mm; border-color: transparent transparent transparent #fff; }
+.sp figure.sp-video figcaption { font-size: 9pt; color: #333; margin-top: .3em; }
 .sp .quiz .answer p + p, .sp .quiz .answer ul, .sp .quiz .answer ol { display: block; margin: .45em 0 0; }
 .sp .quiz .answer ul, .sp .quiz .answer ol { padding-left: 1.3em; }
 .sp .sp-textimage { padding: .6em .9em; border-radius: 4px; margin: .4em 0 1em; }
@@ -699,12 +894,23 @@ def build(dump):
     images = dump.get('images') or {}
     title, pages, hidden = flatten_pages(files['project.xml'])
     title = html.unescape(title or dump.get('title') or 'Cursus')
-    popups = {}
+    popups = POPUPS
+    popups.clear()
     for pid, hp in hidden.items():
         src = files.get(hp['src'])
         if src:
-            bl = [b for e in page_items(src, images, {}) if e['kind'] == 'text' for b in e['blocks']]
-            popups[pid] = {'title': hp['title'], 'html': blocks_html(bl)}
+            its = page_items(src, images, {})
+            parts = []
+            for e in sorted(its, key=lambda e: (e['y'], e['x'])):
+                if e['kind'] == 'text':
+                    parts.append(blocks_html(e['blocks']))
+                elif e['kind'] == 'image' and e.get('data'):
+                    parts.append('<figure class="pu-img"><img src="%s" alt=""></figure>' % e['data'])
+                elif e['kind'] == 'table':
+                    parts.append(e['html'])
+                elif e['kind'] == 'video':
+                    parts.append(h_el(e, {}))
+            popups[pid] = {'title': hp['title'], 'html': ''.join(parts)}
     # bijlagen nummeren in leesvolgorde (eerste vermelding in de cursus)
     for p in pages:
         src = files.get(p['src']) or ''
@@ -729,6 +935,15 @@ def build(dump):
         if p['top'] or cur is None:
             cur = {'title': p['chapter'] or p['title'], 'pages': []}
             chapters.append(cur)
+        # vaste kop in de pagina: alleen tonen als die meer zegt dan de menutitel
+        tnorm = norm(p['title']).lower()
+        for e in els:
+            if e['kind'] == 'label':
+                e['skip'] = e['text'].lower() == tnorm or (tnorm and e['text'].lower().startswith(tnorm) and False)
+                if not e['skip'] and e['y'] < 40:
+                    p = dict(p, title=e['text'])   # bijv. 'Oorzaken' -> 'Oorzaken van stoornissen in de vitale functies'
+                    e['skip'] = True
+        els = [e for e in els if not (e['kind'] == 'label' and e.get('skip'))]
         cur['pages'].append({'title': p['title'], 'items': layout(els)})
     return title, chapters, popups
 
@@ -761,6 +976,21 @@ def render(title, chapters, popups):
             '<body class="forms sp">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
 
 
+def yt_thumbs(dump):
+    """Miniaturen van ingesloten YouTube-video's (openbare afbeelding van YouTube)."""
+    import urllib.request
+    ids = set()
+    for k, v in (dump.get('files') or {}).items():
+        for m in re.finditer(r'youtube\.com/(?:v/|watch\?v=|embed/)([\w-]{6,})', html.unescape(v)):
+            ids.add(m.group(1))
+    for vid in ids:
+        try:
+            data = urllib.request.urlopen('https://img.youtube.com/vi/%s/hqdefault.jpg' % vid, timeout=15).read()
+            YT_THUMBS[vid] = 'data:image/jpeg;base64,' + base64.b64encode(data).decode()
+        except Exception as e:
+            print('geen YouTube-miniatuur', vid, e)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('dump')
@@ -770,6 +1000,8 @@ def main():
     a = ap.parse_args()
     dump = json.load(open(a.dump, encoding='utf-8'))
     # bijlagen achteraan + links alleen met --bijlagen; standaard blijft de tekst zoals op de pagina
+    THUMBS.update(dump.get('thumbs') or {})
+    yt_thumbs(dump)
     ATT.data = {re.sub(r'\s+', ' ', k).strip(): v for k, v in (dump.get('attachments') or {}).items()} if a.bijlagen else {}
     title, chapters, popups = build(dump)
     if a.model:

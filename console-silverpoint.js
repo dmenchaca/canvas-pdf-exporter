@@ -101,7 +101,36 @@
       }
       if (!attachments[u]) P.log('bijlage niet gevonden', u);
     }
-    const out = { kind: 'silverpoint', attachments, title: det.title, base, files: od, images, media: Array.from(refs).filter((u) => !images[u] && !attachments[u]) };
+    // Video's: één beeld (na ~15% van de duur) als miniatuur, zodat in de PDF duidelijk is dat er een video is
+    const thumbs = {};
+    const vids = Array.from(refs).filter((x) => /\.(mp4|webm|m4v|mov)$/i.test(x));
+    for (const u of vids) {
+      if (onProgress) onProgress('video', vids.indexOf(u) + 1, vids.length, u.split('/').pop());
+      for (const url of [base + u, base.replace(/js\/$/, '') + u, base + encodeURI(u)]) {
+        try {
+          const shot = await new Promise((ok, bad) => {
+            const v = document.createElement('video');
+            v.muted = true; v.preload = 'auto'; v.crossOrigin = 'use-credentials'; v.src = url;
+            const t = setTimeout(() => bad(new Error('timeout')), 20000);
+            v.addEventListener('error', () => { clearTimeout(t); bad(new Error('video')); });
+            v.addEventListener('loadedmetadata', () => { v.currentTime = Math.min(Math.max(1, (v.duration || 10) * 0.15), (v.duration || 10) - 0.1); });
+            v.addEventListener('seeked', () => {
+              try {
+                const c = document.createElement('canvas');
+                const w = Math.min(960, v.videoWidth || 640);
+                c.width = w; c.height = Math.round(w * (v.videoHeight || 360) / (v.videoWidth || 640));
+                c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+                clearTimeout(t); ok(c.toDataURL('image/jpeg', 0.82));
+              } catch (e) { clearTimeout(t); bad(e); }
+            }, { once: true });
+          });
+          thumbs[u] = shot;
+          break;
+        } catch (e) { /* volgende proberen */ }
+      }
+      if (!thumbs[u]) P.log('geen miniatuur voor', u);
+    }
+    const out = { kind: 'silverpoint', attachments, thumbs, title: det.title, base, files: od, images, media: Array.from(refs).filter((u) => !images[u] && !attachments[u]) };
     const name = det.title.replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, '-').slice(0, 100) + '.sp.json';
     return { json: JSON.stringify(out), name, pages: det.pages, images: Object.keys(images).length, missing: list.length - Object.keys(images).length, title: det.title };
   };
