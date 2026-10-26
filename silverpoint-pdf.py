@@ -491,6 +491,23 @@ def text_agrees(w, tes, other):
     return all(w[i] == tw[i] or i in same for i in range(len(w)))
 
 
+_FIXED = None
+
+
+def fixed_text_image(images, src):
+    """Afbeelding met tekst die eenmalig is omgezet en gecontroleerd (silverpoint-text-images.json, op inhoud)."""
+    global _FIXED
+    if _FIXED is None:
+        f = os.path.join(HERE, 'silverpoint-text-images.json')
+        _FIXED = json.load(open(f, encoding='utf-8')) if os.path.exists(f) else {}
+    d = images.get(src) or ''
+    if not d or not _FIXED:
+        return None
+    import hashlib
+    e = _FIXED.get(hashlib.sha1(d.split(',', 1)[-1].encode()).hexdigest())
+    return e['html'] if e else None
+
+
 def image_as_text(images, src):
     """Regel: een afbeelding die alleen tekst op een effen achtergrond is, wordt echte tekst (in de eigen kleuren)."""
     try:
@@ -782,10 +799,11 @@ def page_items(xaml, images, hidden_pages):
             src = attr(el, 'Source', '')
             link = next((attr(b, 'Link') for b in el.iter() if local(b.tag) == 'NavigateBehavior'), None)
             if src and images.get(src) and TEXT_IMAGES[0]:
-                tb = image_as_text(images, src)
+                tb = fixed_text_image(images, src) or image_as_text(images, src)
                 if tb:
-                    els.append({'kind': 'textimage', 'x': x, 'y': y, 'w': w, 'h': hh, 'html': tb})
-                    continue
+                    els.append({'kind': 'textimage', 'x': x, 'y': y, 'w': w, 'h': hh, 'html': tb, 'link': link})
+                    src = ''
+                    link = None   # al verwerkt (de link gaat mee met de tekst)
             if src or link:
                 els.append({'kind': 'image', 'x': x, 'y': y, 'w': w, 'h': hh, 'src': src, 'data': images.get(src, ''), 'link': link,
                             'popup': popup})
@@ -991,7 +1009,14 @@ def h_el(e, popups):
             return h
         return h + boxes
     if k == 'textimage':
-        return e['html']
+        h = e['html']
+        ln = e.get('link') or ''
+        if ln.startswith('page://'):
+            # klikbare afbeelding die een pop-up opent: pop-up eronder, zoals bij een gewone afbeelding
+            return h + popup_boxes('data-page="%s"' % re.match(r'page://([\w-]+)', ln).group(1), popups)
+        if re.match(r'^(https?|mailto):', ln):
+            return h + '<p class="note">Link: <a href="%s">%s</a></p>' % (esc(ln), esc(ln))
+        return h
     if k == 'table':
         return '<div class="block">%s</div>' % e['html']
     if k == 'label':
@@ -1056,6 +1081,10 @@ def h_el(e, popups):
 
 
 CSS_EXTRA = """
+.sp .sp-protocol { padding: 3mm 4mm; font-size: 9.6pt; line-height: 1.38; }
+.sp .sp-protocol p { margin: 0 0 .55em; }
+.sp table.sp-textimage { margin: .4em 0 1em; break-inside: avoid; }
+.sp table.sp-textimage p { margin: 0; }
 .sp figure.sp-trigger { margin: .6em 0 .2em; }
 .sp figure.sp-trigger img { max-height: 60mm; width: auto; max-width: 100%; }
 .sp .popup img.pu-icon { height: 1.3em; width: auto; vertical-align: -.25em; margin-right: .4em; }
