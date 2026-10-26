@@ -408,9 +408,14 @@ def ocr_lines(im, scale=3):
     from PIL import Image
     T = tools()
     big = im.resize((im.width * scale, im.height * scale), Image.LANCZOS)
-    p = os.path.join(tempfile.gettempdir(), 'cpe-sp-ocr.png')
-    big.save(p)
-    raw = sorted([l for l in T.ocr(p) if l['t'].strip()], key=lambda l: l['y'])
+    # eigen tijdelijk bestand per lezing: builds die tegelijk draaien mogen elkaars plaatje niet lezen
+    fd, p = tempfile.mkstemp(prefix='cpe-sp-ocr-', suffix='.png')
+    os.close(fd)
+    try:
+        big.save(p)
+        raw = sorted([l for l in T.ocr(p) if l['t'].strip()], key=lambda l: l['y'])
+    finally:
+        os.remove(p)
     rows = []
     for l in raw:   # regels op (bijna) dezelfde hoogte samen, dan links naar rechts
         if rows and abs(l['y'] - rows[-1][0]['y']) < 0.5 * l['h']:
@@ -460,7 +465,7 @@ def gapmatch_html(gg, pairs, images):
             if cnt.max() / cnt.sum() < 0.6:
                 return None                       # geen effen vak (foto/tekening)
             col = vals[cnt.argmax()] + 8
-            lines = ocr_lines(box)
+            lines = sure_lines(box)   # vaktitel: alleen als twee lezers het eens zijn
             if not lines or not text_only(box, lines):
                 return None
             title = ' '.join(l['t'] for l in lines)
@@ -471,7 +476,7 @@ def gapmatch_html(gg, pairs, images):
                 im = img_of(images, obj.get('data')) if obj is not None else None
                 if im is None:
                     return None
-                gl = ocr_lines(im)
+                gl = sure_lines(im)
                 if not gl or not text_only(im, gl):
                     return None
                 labels.append(' '.join(l['t'] for l in gl))
@@ -491,6 +496,19 @@ def gapmatch_html(gg, pairs, images):
 
 
 TEXT_IMAGES = [True]
+
+
+def sure_lines(im):
+    """Tekstregels alleen als Vision en Tesseract het woord voor woord eens zijn; anders None."""
+    from PIL import Image
+    reads = [ocr_lines(im, 3), ocr_lines(im, 2)]
+    wl = lambda t: [w for w in t.split() if re.search(r'\w', w)]
+    words = [wl(' '.join(l['t'] for l in r)) for r in reads]
+    tes = wl(tools().tesseract(im.resize((im.width * 4, im.height * 4), Image.LANCZOS), psm='6'))
+    for r, w, o in [(reads[0], words[0], words[1]), (reads[1], words[1], words[0])]:
+        if text_agrees(w, tes, o):
+            return r
+    return None
 
 
 def text_agrees(w, tes, other):
