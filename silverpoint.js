@@ -73,7 +73,8 @@ function silverpointInstallHelpers() {
       let txt = v;
       for (let n = 0; n < 3; n++) txt = txt.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
       // Elke verwijzing naar een bestand in Resources/, waar die ook staat (Source, data, src, source, ItemsXML, QTI ...)
-      (txt.match(/Resources\/[^"'<>\n]+?\.(?:png|jpe?g|gif|svg|bmp|webp|mp4|webm|m4v|mov|mp3|wav|pdf)/gi) || []).forEach(add);
+      // extensie moet aan het eind van de naam staan: 'x.jpg.png' en 'x.jpg-1.png' niet afkappen na '.jpg'
+      (txt.match(/Resources\/[^"'<>\n]+?\.(?:png|jpe?g|gif|svg|bmp|webp|mp4|webm|m4v|mov|mp3|wav|pdf)(?=["'<>\s)]|$)/gi) || []).forEach(add);
       (txt.match(/(?:Link|NavigateUri)="((?:int|rsc):\/\/[^"]+)"/g) || []).forEach((m) => add(m.replace(/^[a-zA-Z]+="/, '').replace(/"$/, '')));
     }
     const images = {};
