@@ -209,6 +209,9 @@ def qti_html(el, images):
         src = html.unescape(m.group(1))
         d = images.get(src) or images.get(re.sub(r'^\./', '', src))
         if d:
+            fixed = fixed_text_image(images, src if images.get(src) else re.sub(r'^\./', '', src))
+            if fixed:
+                return fixed   # gecontroleerde omzetting naar echte tekst (ook in vragen en feedback)
             return '<img class="qti-img" src="%s" alt="">' % d
         if re.match(r'https?://', src):
             return '<img class="qti-img" src="%s" alt="">' % esc(src)
