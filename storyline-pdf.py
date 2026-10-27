@@ -102,8 +102,33 @@ END_RE = re.compile(r'^einde (hoofdstuk|module|e-module|van (dit|het) hoofdstuk)
 
 # ----------------------------------------------------------------------------- extractie
 
+def fkey(fam):
+    """'"TSTAR TWBold CharseBold15C75E9F"' en 'TSTAR TW' -> 'tstartw' (zelfde lettertypefamilie)."""
+    f = re.sub(r'(?i)chars\w*|_v\w+|bold|regular|["\s]', '', fam or '').lower()
+    return re.sub(r'(pro|tw|std|lt)$', '', f)   # 'TSTAR PRO' en 'TSTAR TW' zijn dezelfde familie
+
+
+BODY_FONTS = set()  # fontnaam van de gewone tekst in deze cursus (kan 'Bold' in de naam hebben)
+
+
 class Course:
     def __init__(self, dump):
+        # meest gebruikte lettertype = gewone tekst, ook als de naam 'Bold' bevat
+        fams = Counter()
+        def _walk(o):
+            if isinstance(o, dict):
+                if 'fontFamily' in o and o.get('text') is None:
+                    fams[o['fontFamily'].split(',')[0].strip('"')] += 1
+                for v in o.values():
+                    _walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    _walk(v)
+        for sl_ in (dump.get('slides') or {}).values():
+            _walk(sl_)
+        BODY_FONTS.clear()
+        if fams:
+            BODY_FONTS.add(fams.most_common(1)[0][0])
         self.title = norm(decode(dump.get('title') or 'Cursus'))
         self.data = dump['data']
         self.frame = dump.get('frame') or {}
@@ -159,6 +184,12 @@ class Course:
         if not item:
             return None
         vt = item['vartext']
+        # tekstlinks: span.style.linkId -> event 'onlinkrelease' met open_url op hetzelfde object
+        links = {}
+        for ev in ob.get('events') or []:
+            for ac in ev.get('actions') or []:
+                if ac.get('kind') == 'open_url' and ac.get('url') and ev.get('triggerid') and not re.fullmatch(r'[0-]+', ev['triggerid']):
+                    links[ev['triggerid']] = ac['url'].strip()
         base = ((vt.get('defaultBlockStyle') or {}).get('baseSpanStyle') or {}).get('fontSize') or 0
         blocks = []
         dstyle = vt.get('defaultBlockStyle') or {}
@@ -168,11 +199,18 @@ class Course:
             for sp in b.get('spans') or []:
                 st = sp.get('style') or {}
                 fam = (st.get('fontFamily') or '').split(',')[0]
+                body_bold_variant = False
+                if fam.strip('"') in BODY_FONTS:
+                    fam = ''
+                elif any(fkey(fam) == fkey(bf) and re.search(r'bold', bf, re.I) for bf in BODY_FONTS):
+                    body_bold_variant = True  # 'TSTAR TW' + vet = hetzelfde lettertype als de gewone tekst ('TSTAR TWBold')
                 # Storyline zet vet vaak via de fontnaam ('Akkurat ProBold') i.p.v. fontIsBold
                 spans.append({'text': decode(sp.get('text') or ''),
-                              'bold': bool(st.get('fontIsBold')) or bool(re.search(r'bold|black|heavy', fam, re.I)),
+                              'bold': not body_bold_variant and (bool(st.get('fontIsBold')) or bool(re.search(r'bold|black|heavy', fam, re.I))),
                               'attr_bold': bool(st.get('fontIsBold')),  # voor structuur (kopherkenning) ongewijzigd
-                              'size': st.get('fontSize') or base})
+                              'size': st.get('fontSize') or base,
+                              'url': links.get(st.get('linkId')) if st.get('linkId') and not re.fullmatch(r'[0-]+', st.get('linkId')) else None,
+                              'underline': bool(st.get('fontIsUnderline'))})
             text = ''.join(s['text'] for s in spans)
             style = b.get('style') or {}
             if not norm(text):
@@ -303,6 +341,19 @@ class Course:
                         seen.add(t)
                         text_count[t] += 1
         self.text_count = text_count
+        # Afbeelding die op (bijna) elke dia op dezelfde plek terugkomt (logo/icoon van de cursus): decoratie.
+        img_count = Counter()
+        for sid in self.order:
+            sl = self.slides.get(sid)
+            if not sl or not sl.get('slideLayers'):
+                continue
+            seen = set()
+            for it in self.flatten(sl['slideLayers'][0]):
+                u = self.image_url(it['ob'])
+                if u and u not in seen:
+                    seen.add(u)
+                    img_count[(u, round(it['x'] / 20), round(it['y'] / 20))] += 1
+        self.repeated_images = {k[0] for k, v in img_count.items() if v >= 3 and v >= 0.4 * self.slide_count}
 
     def layer_signature(self, L):
         items = self.flatten(L)
@@ -364,14 +415,31 @@ class Course:
         wrong_layers = set()
         for inter in interactions:
             wrong_layers |= feedback_layers(inter)[1] - feedback_layers(inter)[0]
+        badges = []
+        hotspots = []  # (laag, x, y, w, h, url): klikvlak met open_url boven tekst
         for li, L in enumerate(sl.get('slideLayers') or []):
-            layer_ids[li] = L.get('id')
-            if self.is_chrome_layer(L) or self.is_tutorial_layer(L) or L.get('id') in wrong_layers:
-                continue
             for it in self.flatten(L):
                 ob = it['ob']
+                if self.text_blocks(ob):
+                    continue
+                for ev in ob.get('events') or []:
+                    for ac in ev.get('actions') or []:
+                        if ac.get('kind') == 'open_url' and ac.get('url') and ev.get('kind') in ('onrelease', 'onclick'):
+                            hotspots.append((li, it['x'], it['y'], ob.get('width') or 0, ob.get('height') or 0, ac['url'].strip()))
+            layer_ids[li] = L.get('id')
+            if self.is_chrome_layer(L) or self.is_tutorial_layer(L) or L.get('id') in wrong_layers or L.get('id') in OMIT_LAYERS:
+                continue
+            for z, it in enumerate(self.flatten(L)):
+                ob = it['ob']
                 base = {'x': it['x'], 'y': it['y'], 'gx': it['gx'], 'gy': it['gy'], 'layer': li, 'id': ob.get('id'),
-                        'gid': it.get('gid'), 'gacc': it.get('gacc')}
+                        'gid': it.get('gid'), 'gacc': it.get('gacc'), 'z': z}
+                tb_ = self.text_blocks(ob)
+                if tb_ and (ob.get('width') or 0) <= 90 and (ob.get('height') or 0) <= 90 \
+                        and re.fullmatch(r'\s*\d{1,2}\.?\s*', ''.join(b['text'] for b in tb_)):
+                    # nummerbolletje van een stappenplan ('1' in een cirkel naast de stap)
+                    badges.append({'layer': li, 'x': it['x'], 'y': it['y'], 'w': ob.get('width') or 0, 'h': ob.get('height') or 0,
+                                   'n': int(re.sub(r'\D', '', ''.join(b['text'] for b in tb_)))})
+                    continue
                 kind = ob.get('kind')
                 if kind == 'video':
                     entries.append(dict(base, kind='note', text='Video: ' + (ob.get('altText') or 'video in de e-module')))
@@ -383,6 +451,8 @@ class Course:
                     entries.append(dict(base, kind='input', w=ob.get('width') or 0, h=ob.get('height') or 0))
                     continue
                 url = self.image_url(ob)
+                if url and url in self.repeated_images:
+                    url = ''  # logo/icoon dat op elke dia staat
                 if url and self.decorative(ob, url) and not self.decorative(ob, url, ignore_size=True) \
                         and self.images.get(url) and ('img:' + url) not in seen:
                     # Klein plaatje: alleen houden als er een onderschrift onder staat (thumbnailrij), zie structure_entries.
@@ -401,14 +471,18 @@ class Course:
                 if not blocks:
                     continue
                 full = norm(' '.join(b['text'] for b in blocks))
+                if any(o == full for o in OMIT_TEXT):
+                    continue
                 popup_title = False
                 if ob.get('accType') == 'button':
                     # Kopbalk van een pop-uplaag ('Inwendige verbranding' met sluitknop) is de titel van die uitleg.
                     if li == 0 or L.get('isBaseLayer') or len(full) > 60 or self.is_chrome_text(full):
                         continue
                     popup_title = True
-                if self.is_chrome_text(full):
-                    continue
+                keep_label = (NAV_WORD_RE.match(full) and re.match(r'^(bronnen)$', full, re.I) and ob.get('accType') == 'text'
+                              and it.get('gacc') != 'button' and self.text_count.get(full, 0) <= 2)
+                if self.is_chrome_text(full) and not keep_label:
+                    continue  # ('Bronnen' als opschrift boven bronvermeldingen blijft wel staan)
                 if is_nav_only(full):
                     continue  # 'Je hebt het onderdeel X afgerond', 'Klik op volgende om ...' e.d.
                 if it.get('gacc') == 'button' and re.search(r'navigat', full, re.I):
@@ -420,6 +494,87 @@ class Course:
                                     is_choice=full in choice_texts or full.lower() in choice_texts, acc=ob.get('accType'),
                                     all_bold=all(s.get('attr_bold', s['bold']) for b in blocks for s in b['spans'] if norm(s['text'])),
                                     w=ob.get('width') or 0, h=ob.get('height') or 0))
+        # Klikvlak over tekst ('klik hier'): de onderstreepte of 'hier'-woorden onder het vlak krijgen de link.
+        # Meerdere klikvlakken over één tekstvak (bronnenlijst) worden op volgorde van boven naar beneden gekoppeld.
+        for e in entries:
+            if e['kind'] != 'text':
+                continue
+            ex, ey, ew, eh = e['x'], e['y'], e.get('w') or 0, e.get('h') or 0
+            hs = sorted([h for h in hotspots if h[0] == e['layer'] and not (h[1] > ex + ew or h[1] + h[3] < ex or h[2] > ey + eh or h[2] + h[4] < ey)],
+                        key=lambda h: h[2])
+            if not hs:
+                continue
+            spans = [sp for b in e['blocks'] for sp in b['spans']]
+            total = sum(len(sp['text']) for sp in spans) or 1
+            pos, acc = {}, 0
+            for sp in spans:
+                pos[id(sp)] = (acc + len(sp['text']) / 2) / total
+                acc += len(sp['text'])
+            cand = [sp for sp in spans if not sp.get('url') and norm(sp['text'])
+                    and (sp.get('underline') or re.fullmatch(r'\s*(hier|deze|video|klik hier|link)\s*[.:]?\s*', sp['text'], re.I))]
+            # aaneengesloten onderstreepte spans (één titel over meerdere spans) als één kandidaat
+            groups = []
+            for sp in cand:
+                if groups and spans.index(sp) == spans.index(groups[-1][-1]) + 1 and not re.search(r'[\r\n]\s*$', groups[-1][-1]['text']):
+                    groups[-1].append(sp)
+                else:
+                    groups.append([sp])
+            if not groups:
+                continue
+            if len(hs) == len(groups):
+                pairs = list(zip(hs, groups))
+            elif len(hs) == 1:
+                frac = (hs[0][2] + hs[0][4] / 2 - ey) / max(eh, 1)
+                g = min(groups, key=lambda g: abs(pos[id(g[0])] - frac))
+                pairs = [(hs[0], g)] if len(groups) == 1 or abs(pos[id(g[0])] - frac) <= 0.35 else []
+            else:
+                pairs = []  # niet eenduidig: liever geen link dan een verkeerde
+            for h, g in pairs:
+                for sp in g:
+                    sp['url'] = h[5]
+        # Stapnummers: bolletjes links naast een tekstvak horen bij de alinea's in dat vak (1 bolletje per alinea).
+        for e in entries:
+            if e['kind'] != 'text' or not badges:
+                continue
+            bs = sorted([b for b in badges if b['layer'] == e['layer'] and b['x'] + b['w'] <= e['x'] + 25
+                         and e['x'] - b['x'] <= 220 and e['y'] - 35 <= b['y'] <= e['y'] + (e.get('h') or 0)], key=lambda b: b['y'])
+            uniq = {}
+            for b in bs:  # dubbel bolletje met hetzelfde nummer (verborgen kopie) maar één keer
+                uniq.setdefault(b['n'], b)
+            bs = sorted(uniq.values(), key=lambda b: b['y'])
+            plain = [b for b in e['blocks'] if b['list'] == 'none']
+            subs = [b for b in plain if BULLET_RE.match(b['text'])]   # '- zijn de membranen aanwezig?' onder stap 6
+            steps = [b for b in plain if not BULLET_RE.match(b['text'])]
+            consecutive = [b['n'] for b in bs] == list(range(bs[0]['n'], bs[0]['n'] + len(bs))) if bs else False
+            # één bolletje per alinea; een extra slotregel zonder bolletje ('Bekijk ook de video') blijft gewone tekst
+            if bs and consecutive and len(plain) == len(e['blocks']) and len(bs) <= len(steps) <= len(bs) + 1:
+                for sb in subs:
+                    sb['list'] = 'bullet'
+                    sb['level'] = 1
+                    sb['text'] = BULLET_RE.sub('', sb['text'])
+                    if sb['spans']:
+                        sb['spans'][0]['text'] = BULLET_RE.sub('', sb['spans'][0]['text'])
+                for bd in list(badges):
+                    if bd['layer'] == e['layer'] and bd['n'] in uniq and bd not in bs and abs(bd['y'] - uniq[bd['n']]['y']) < 120:
+                        badges.remove(bd)
+                for blk, bd in zip(steps, bs):
+                    blk['list'] = 'listNumberedAsArabic'
+                    blk['start'] = bd['n']
+                    blk['level'] = 0
+                for bd in bs:
+                    badges.remove(bd)
+        # Tekst die grotendeels onder een later getekend tekstvak ligt, is op de dia niet te zien.
+        txt = [e for e in entries if e['kind'] == 'text']
+        def _cover(a, b):
+            ix = max(0, min(a['x'] + (a.get('w') or 0), b['x'] + (b.get('w') or 0)) - max(a['x'], b['x']))
+            iy = max(0, min(a['y'] + (a.get('h') or 0), b['y'] + (b.get('h') or 0)) - max(a['y'], b['y']))
+            return ix * iy / max((a.get('w') or 1) * (a.get('h') or 1), 1)
+        same = lambda a, b: (round(a['x']), round(a['y']), a.get('w'), a.get('h')) == (round(b['x']), round(b['y']), b.get('w'), b.get('h'))
+        hidden = [] if interactions else \
+            [a for a in txt if a['layer'] == 0 and 'expandinglabel' not in str(a.get('id'))
+             and any(b is not a and b['layer'] == a['layer'] and b.get('z', 0) > a.get('z', 0) and not same(a, b)
+                     and 'expandinglabel' not in str(b.get('id')) and _cover(a, b) >= 0.6 for b in txt)]
+        entries = [e for e in entries if not any(e is h for h in hidden)]
         # Losse tekst die binnen het kader van een groep met maar één tekst (de kaarttitel) ligt, hoort bij die kaart:
         # bv. 'Voor wie?' in een gekleurd vak met de uitleg als los tekstvak erin.
         for li, L in enumerate(sl.get('slideLayers') or []):
@@ -535,8 +690,11 @@ class Course:
 # ----------------------------------------------------------------------------- structuur op de dia
 
 def _is_label(e):
-    return (e['kind'] == 'text' and not e.get('is_choice') and len(e['blocks']) == 1 and
-            len(norm(e['text'])) <= 40 and not re.search(r'[.;:]$', norm(e['text'])))
+    # kort opschrift; mag over 2-3 regels gebroken zijn ('Scorings-' / 'mogelijkheden')
+    return (e['kind'] == 'text' and not e.get('is_choice') and len(e['blocks']) <= 3 and
+            not re.search(r'[.;:]$', norm(e['text'])) and
+            (len(norm(e['text'])) <= 40 and (len(e['blocks']) == 1 or all(len(norm(b['text'])) <= 20 and b['list'] == 'none' for b in e['blocks']))
+             or (len(norm(e['text'])) <= 75 and e.get('size', 0) >= 26 and e.get('h', 0) and (e.get('w') or 0) <= 450)))
 
 
 def structure_entries(entries):
@@ -710,10 +868,37 @@ def structure_entries(entries):
         for layer, ps in by_layer.items():
             if len(ps) < 2:
                 continue
+            # rijen: labels waarvan de vakken elkaar verticaal overlappen staan naast elkaar -> links naar rechts
             ps.sort(key=lambda lv: lv[0]['y'])
+            bands_ = []
+            for lv in ps:
+                l0 = lv[0]
+                top, bot = l0['y'], l0['y'] + (l0.get('h') or 0)
+                if bands_ and top < bands_[-1]['bot'] - 10:
+                    bands_[-1]['items'].append(lv)
+                    bands_[-1]['bot'] = max(bands_[-1]['bot'], bot)
+                else:
+                    bands_.append({'bot': bot, 'items': [lv]})
+            ps = [lv for b_ in bands_ for lv in sorted(b_['items'], key=lambda lv: lv[0]['x'])]
             first = ps[0][0]
+            rows_ = []
+            for l, v in ps:
+                blocks = list(v['blocks'])
+                # tekst die op dezelfde hoogte rechts naast de waarde staat (tweede kolom van dezelfde rij)
+                vr = v['x'] + (v.get('w') or 0)
+                for t in sorted(texts, key=lambda t: t['x']):
+                    if id(t) in used or t is l or t is v or t['layer'] != layer or _is_label(t):
+                        continue
+                    if vr - 30 <= t['x'] <= vr + 250 and abs(t['y'] - v['y']) <= 40:
+                        blocks += t['blocks']
+                        used.add(id(t))
+                lab = ''
+                for b in l['blocks']:  # 'Scorings-' + 'mogelijkheden' -> 'Scorings-mogelijkheden'
+                    t = norm(b['text'])
+                    lab = lab + t if lab.endswith('-') else (lab + ' ' + t).strip()
+                rows_.append((lab, blocks))
             entries.append({'kind': 'labelrows', 'layer': layer, 'x': first['x'], 'y': first['y'], 'gx': first['gx'],
-                            'gy': first['gy'], 'rows': [(norm(l['text']), v['blocks']) for l, v in ps], 'text': '', 'size': 0})
+                            'gy': first['gy'], 'rows': rows_, 'text': '', 'size': 0})
             for l, v in ps:
                 used.add(id(l))
                 used.add(id(v))
@@ -788,8 +973,16 @@ def runs_of(blocks, keep_bold_all=False):
             all_bold = False
         for s in b['spans']:
             bold = s['bold'] and (not all_bold or keep_bold_all)
-            out.append((s['text'], bold))
+            out.append((s['text'], Link(bold, s['url']) if s.get('url') else bold))
     return out
+
+
+class Link(int):
+    """Vet-vlag van een run die ook een externe link draagt (blijft overal bruikbaar als True/False)."""
+    def __new__(cls, bold, url):
+        o = int.__new__(cls, 1 if bold else 0)
+        o.url = url
+        return o
 
 
 def runs_to_markup(runs):
@@ -798,10 +991,13 @@ def runs_to_markup(runs):
     for text, bold in runs:
         t = re.sub(r'[\r\n\u000b]+', ' ', text)
         t = esc(t)
+        url = getattr(bold, 'url', None)
         if bold and t.strip():
-            parts.append('<b>' + t + '</b>')
-        else:
-            parts.append(t)
+            t = '<b>' + t + '</b>'
+        if url and t.strip():
+            lead = re.match(r'^\s*', t).group(0)
+            t = lead + '<a href="%s">%s</a>' % (esc(url).replace('"', '&quot;'), t[len(lead):])
+        parts.append(t)
     s = ''.join(parts)
     s = re.sub(r'[ \t]+', ' ', s)
     # \u2028 = regeleinde binnen een alinea (vervolgregel zonder witruimte ertussen, zoals op de dia)
@@ -834,6 +1030,10 @@ def block_to_items(block):
         tag = 'ol' if re.search(r'number|decimal|arabic|letter|roman', lst, re.I) else 'ul'
         level = int(block.get('level') or 0)
         start = block.get('start') if tag == 'ol' else None
+        if len(lines) > 1 and all(BULLET_RE.match(l) for l in lines[1:]):
+            # genummerde stap met eigen opsommingsregels in hetzelfde blok ('6. Het masker: / - zijn de membranen ...')
+            first = [('li', [(lines[0], False)], tag + (':%d' % level if level else '') + ('@%d' % start if start and start > 1 else ''))]
+            return first + [('li', [(BULLET_RE.sub('', l), False)], 'ul:%d' % (level + 1)) for l in lines[1:]]
         return [('li', runs_of([block]), tag + (':%d' % level if level else '') + ('@%d' % start if start and start > 1 else ''))]
     if lines and all(BULLET_RE.match(l) for l in lines):
         return [('li', [(BULLET_RE.sub('', l), False)], 'ul') for l in lines]
@@ -1176,6 +1376,17 @@ def merge_broken_paragraphs(items):
     return out
 
 
+def _url_of(e):
+    """Externe link van een tekstvak dat als kop wordt getoond (alleen als het hele vak één link heeft)."""
+    us = {sp.get('url') for b in e.get('blocks') or [] for sp in b['spans'] if norm(sp['text'])}
+    return next(iter(us)) if len(us) == 1 and None not in us else None
+
+
+def _link(it):
+    t = esc(it['text'])
+    return '<a href="%s">%s</a>' % (esc(it['url']).replace('"', '&quot;'), t) if it.get('url') else t
+
+
 def slide_model(course, sid, suppress_heading=False):
     entries, interactions, layer_ids = course.slide_entries(sid)
     if not entries:
@@ -1220,13 +1431,15 @@ def slide_model(course, sid, suppress_heading=False):
             body = [e for e in les if e is not title]
             if not body:
                 continue
+            pimgs = [e for e in entries if e['layer'] == li and e['kind'] == 'image']
             popups.append({'kind': 'popup', 'title': norm(title['text']) if title else '',
-                           'items': [it for e in body for b in e['blocks'] for it in block_to_items(b)]})
-            for e in les:
+                           'items': blocks_items([b for e in body for b in e['blocks']]),
+                           'images': [{'url': e['url'], 'w': e['w'], 'h': e['h'], 'alt': e.get('alt', '')} for e in pimgs]})
+            for e in les + pimgs:
                 popup_ids.add(e)
 
     if heading is not None and not suppress_heading:
-        items.append({'kind': 'h2', 'text': norm(heading['text'])})
+        items.append({'kind': 'h2', 'text': norm(heading['text']), 'url': _url_of(heading)})
     quiz_placed = False
     has_solution = any(q.get('solution') for q in quizzes)
     biggest = max([e for e in entries if e['kind'] == 'image' and e['layer'] == 0], key=lambda e: (e.get('w') or 0) * (e.get('h') or 0), default=None)
@@ -1259,7 +1472,7 @@ def slide_model(course, sid, suppress_heading=False):
                 continue
             nxt = next((n for n in entries[entries.index(e) + 1:] if n['kind'] == 'text' and not n.get('is_choice')), None)
             if is_heading_like(e, slide_max, body_size) or is_label_before_body(e, nxt):
-                items.append({'kind': 'h3', 'text': norm(e['text'])})
+                items.append({'kind': 'h3', 'text': norm(e['text']), 'url': _url_of(e)})
                 continue
             for b in e['blocks']:
                 for kind, runs, tag in block_to_items(b):
@@ -1352,8 +1565,9 @@ def slide_model(course, sid, suppress_heading=False):
     elif len(imgs) == 1 and not quizzes:
         # Tekst links, foto rechts (zoals op de dia): naast elkaar zetten in plaats van onder elkaar.
         img = imgs[0]
+        # alleen de tekstkolom links van de afbeelding telt (tekst in/onder het beeld, zoals een TIP-kader, niet)
         body_entries = [e for e in entries if e['kind'] == 'text' and e is not heading and e['layer'] == 0
-                        and not CREDIT_RE.match(norm(e['text']))]
+                        and not CREDIT_RE.match(norm(e['text'])) and e['x'] < img.get('x', 0)]
         right_edge = max([e['x'] + (e.get('w') or 0) for e in body_entries] or [0])
         if body_entries and img.get('x', 0) >= right_edge - 40:
             head = [x for x in items if x['kind'] == 'h2']
@@ -1361,6 +1575,12 @@ def slide_model(course, sid, suppress_heading=False):
             rest = [x for x in items if x['kind'] not in ('h2', 'caption', 'image')]
             if rest and all(x['kind'] in ('p', 'list', 'h3') for x in rest):
                 items = head + [{'kind': 'aside', 'items': rest, 'image': img, 'captions': [c['text'] for c in caps]}]
+            else:
+                # afbeelding rechts naast een stappenplan met pop-ups: na de tekstkolom, niet erboven
+                left_ids = {id(e) for e in body_entries}
+                items = [x for x in items if x is not img]
+                last = max([i for i, x in enumerate(items) if x['kind'] in ('p', 'list', 'h3', 'labelrows')] or [-1])
+                items.insert(last + 1, img)
     signature = norm(' '.join(item_text(x) for x in items if x['kind'] in ('h2', 'h3', 'p', 'list', 'labelrows', 'cards', 'aside', 'figrow', 'figcaps', 'overview', 'table', 'popup')))
     return items, (norm(heading['text']) if heading is not None else ''), signature
 
@@ -1436,6 +1656,14 @@ def blocks_items(blocks):
     out = []
     for b in blocks:
         its = block_to_items(b)
+        t0 = b['text'].lstrip(' \t')
+        if out and its and its[0][0] == 'p' and t0[:1].islower() and b.get('list', 'none') == 'none':
+            prev = ''.join(r[0] for r in out[-1][1]).rstrip()
+            if prev and not re.search(r'[.!?:;]$', prev):
+                # afgebroken regel ('Haak de vingers van beide handen in' / 'elkaar (voorkom ...'): hoort bij de vorige
+                k, runs, tag = out[-1]
+                out[-1] = (k, list(runs) + [(' ', False)] + [(r[0].lstrip(' \t') if i == 0 else r[0], r[1]) for i, r in enumerate(its[0][1])], tag)
+                its = its[1:]
         if b.get('tight') and out and out[-1][0] == 'p' and its and its[0][0] == 'p':
             k, runs, tag = out[-1]
             out[-1] = (k, list(runs) + [('\u2028', False)] + list(its[0][1]), tag)
@@ -2044,7 +2272,9 @@ def h_quiz(q):
         for kind, runs, tag in merge_broken_tuples(q['feedback']):
             fb.append(('<p>• ' if kind == 'li' else '<p>') + h_runs(runs) + '</p>')
         for im in q.get('fb_images') or []:
-            if im.get('data'):
+            if im.get('url') in TABLES:
+                fb.append(TABLES[im['url']]['html'])
+            elif im.get('data'):
                 fb.append('<figure class="fb-image"><img src="%s" alt="%s"></figure>' % (im['data'], esc(im.get('alt', ''))))
         body.append('<div class="answer"><span class="answer-label">%s:</span> %s</div>' % (
             'Voorbeeldantwoord' if q.get('open') else 'Toelichting', ''.join(fb)))
@@ -2080,11 +2310,41 @@ def h_cell(items):
     return h_blockitems(items, merge=False)
 
 
+OMIT_LAYERS = set()  # uit <cursus>.fixes.json: laag-id's die nooit getoond worden (restant van een sjabloon)
+OMIT_TEXT = []  # uit <cursus>.fixes.json: teksten die op de dia niet zichtbaar zijn (verborgen restanten)
+DEDUPE_TITLES = [False]
+COMPACT = [False]  # --compact: instructiekaart-opmaak (dichter op elkaar, kopjes i.p.v. pijllabels)
+TABLES = {}  # afbeelding-url -> {'html': ...} uit <cursus>.tables.json (image-tables.py)
+
+
+_TABLES_SHOWN = set()
+
+
+def h_table_img(url):
+    """Omgezette tabel; dezelfde tabel (vaak ook als vergroting in een pop-up) maar één keer tonen."""
+    t = TABLES.get(url)
+    if not t or not t.get('html'):
+        return ''  # leeg = bewust weggelaten (bv. vergrote kopie van een tabel die al getoond wordt)
+    key = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', t['html'])).strip()
+    if key in _TABLES_SHOWN:
+        return ''
+    _TABLES_SHOWN.add(key)
+    return '<div class="block imgtable-wrap">%s</div>' % t['html']
+
+
 def h_item(it):
     k = it['kind']
     if k == 'popup':
         head = '<div class="pu-head">%s</div>' % esc(it['title']) if it['title'] else ''
-        return '<div class="popup%s">%s<div class="pu-body">%s</div></div>' % ('' if it['title'] else ' untitled', head, h_blockitems(it['items']))
+        imgs = ''
+        for im in it.get('images') or []:
+            if im.get('url') in TABLES:
+                imgs += h_table_img(im['url'])
+            elif im.get('data'):
+                imgs += '<figure class="pu-img"><img src="%s" alt="%s"></figure>' % (im['data'], esc(im.get('alt', '')))
+        if not it['items'] and not imgs:
+            return ''  # alleen een (al getoonde) tabel: geen leeg kader
+        return '<div class="popup%s">%s<div class="pu-body">%s%s</div></div>' % ('' if it['title'] else ' untitled', head, h_blockitems(it['items']), imgs)
     if k == 'table':
         rows = ''.join('<tr>%s</tr>' % ''.join('<td>%s</td>' % h_cell(c) for c in row) for row in it['rows'])
         return '<table class="sltable">%s</table>' % rows
@@ -2100,6 +2360,8 @@ def h_item(it):
         n = len(it['figs'])
         cols = 2 if n == 4 else min(n, 5)  # vier foto's: 2x2 raster, groter en beter leesbaar
         return '<div class="figrow n%d%s">%s</div>' % (cols, ' grid' if cols < n else '', figs)
+    if k == 'labelrows' and COMPACT[0]:
+        return ''.join('<div class="lblsec"><h3>%s</h3>%s</div>' % (esc(l), h_blockitems(v)) for l, v in it['rows'])
     if k == 'labelrows':
         rows = ''.join('<div class="labelrow"><div class="lbl">%s</div><div class="val">%s</div></div>' % (esc(l), h_blockitems(v))
                        for l, v in it['rows'])
@@ -2110,15 +2372,17 @@ def h_item(it):
         return '<div class="slcards n%d">%s</div>' % (min(n, 3) if n > 1 else 2, cs)
     if k == 'aside':
         img = it['image']
+        if img.get('url') in TABLES:
+            return ''.join(h_item(x) for x in it['items']) + h_table_img(img['url'])
         if not img.get('data'):
             return ''.join(h_item(x) for x in it['items'])
         caps = ''.join('<figcaption>%s</figcaption>' % esc(c) for c in it.get('captions') or [])
         return ('<div class="image-aside"><div class="text">%s</div><figure><img src="%s" alt="%s">%s</figure></div>'
                 % (''.join(h_item(x) for x in it['items']), img['data'], esc(img.get('alt', '')), caps))
     if k == 'h2':
-        return '<h2 class="section">%s</h2>' % esc(it['text'])
+        return '<h2 class="section">%s</h2>' % _link(it)
     if k == 'h3':
-        return '<h3>%s</h3>' % esc(it['text'])
+        return '<h3>%s</h3>' % _link(it)
     if k == 'p':
         return '<div class="block"><p>%s</p></div>' % h_runs(it['runs'])
     if k == 'list':
@@ -2130,16 +2394,68 @@ def h_item(it):
     if k == 'note':
         return '<p class="note">[%s]</p>' % esc(it['text'])
     if k == 'image':
+        if it.get('url') in TABLES:
+            return h_table_img(it['url'])
         if not it.get('data'):
             return ''
         cls = 'wide' if it['w'] > it['h'] * 1.6 else ''
         return '<figure class="%s"><img src="%s" alt="%s"></figure>' % (cls, it['data'], esc(it.get('alt', '')))
     if k == 'gallery':
-        figs = ''.join('<figure><img src="%s" alt="%s"></figure>' % (im['data'], esc(im.get('alt', ''))) for im in it['images'] if im.get('data'))
-        return '<div class="gallery">%s</div>' % figs if figs else ''
+        ims = [im for im in it['images'] if im.get('data')]
+        wmax = max((im.get('w') or 0 for im in ims), default=0)
+        def _full(im):
+            # groot beeld naast een duidelijk kleiner beeld (tabel naast een tekening): eigen volle rij, anders onleesbaar klein
+            w = im.get('w') or 0
+            return len(ims) > 1 and w >= 700 and w == wmax and any((o.get("w") or 0) <= 0.85 * w for o in ims if o is not im)
+        # als tekst omgezette tabellen staan los (volle breedte), de foto's ertussen blijven een galerij
+        parts, figs = [], ''
+        for im in ims:
+            if im.get('url') in TABLES:
+                if figs:
+                    parts.append('<div class="gallery">%s</div>' % figs)
+                    figs = ''
+                parts.append(h_table_img(im['url']))
+            else:
+                figs += '<figure%s><img src="%s" alt="%s"></figure>' % (' class="full"' if _full(im) else '', im['data'], esc(im.get('alt', '')))
+        if figs:
+            parts.append('<div class="gallery">%s</div>' % figs)
+        return ''.join(parts)
     if k == 'quiz':
         return h_quiz(it)
     return ''
+
+
+COMPACT_CSS = '''
+@page { margin: 16mm 18mm 18mm; }
+body.compact { font-size: 9.8pt; line-height: 1.45; }
+.compact .cover { min-height: 0; break-after: auto; display: block; padding: 0; margin: 0 0 9mm; }
+.compact .cover .cover-kicker { font-size: 10pt; color: #bc1413; margin: 0 0 .3em; }
+.compact .cover h1 { font-size: 21pt; line-height: 1.15; margin: 0 0 .35em; letter-spacing: -.01em; }
+.compact .cover .cover-version { font-size: 9pt; color: #666; margin: 0; }
+.compact .cover .toc { display: none; }
+.compact .cover .provenance { margin: 0 0 6mm; }
+.compact .chapter { break-before: auto; }
+.compact h2.section { font-size: 13pt; margin: 2.1em 0 .5em; padding: 0; border: 0; }
+.compact .chapter > h2.section:first-child { margin-top: 0; }
+.compact h3, .compact .lblsec h3 { font-size: 10.6pt; margin: 1.1em 0 .25em; color: #1d3a5c; }
+.compact .lblsec { break-inside: avoid-page; }
+.compact .block { margin: 0 0 .6em; }
+.compact p { margin: 0 0 .45em; }
+.compact figure img, .compact .gallery figure img { max-height: 42mm; }
+.compact .gallery figure.full img { max-height: 80mm; }
+.compact .image-aside figure img { max-height: 50mm; }
+.compact .popup { margin: .6em 0 .9em; padding: .5em .8em; }
+.compact .popup figure.pu-img img { max-height: 30mm; }
+.compact .popup, .compact .keep-pair, .compact .gallery { break-inside: auto; }
+.compact .popup .pu-head { break-after: avoid; }
+.compact figure { break-inside: avoid; }
+.compact table.imgtable { font-size: 8.3pt; margin: .3em 0 .9em; }
+.compact table.imgtable td { padding: .22em .45em; }
+.compact .popup { border: 0; border-left: 3px solid #2f6fa3; border-radius: 0 6px 6px 0; background: #f3f6fa; padding: .65em .95em .7em; box-shadow: none; }
+.compact .popup .pu-head { background: none; color: #1d3a5c; padding: 0; margin: 0 0 .35em; font-size: 10.2pt; font-weight: 700; text-transform: none; letter-spacing: 0; }
+.compact .popup .pu-body { padding: 0; }
+.compact .popup.untitled { border-left-color: #9fb3c8; }
+'''
 
 
 _B2P = None
@@ -2158,6 +2474,9 @@ def render_html(chapters, title, version=''):
     ver = '<p class="cover-version">%s</p>' % esc(version) if version else ''
     cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>%s'
              '<div class="toc"><h2>Inhoud</h2><ul class="toc-list">%s</ul></div>%s</section>') % (esc(title), ver, toc, provenance_html(title, version))
+    if COMPACT[0]:  # info-kader bovenaan, dan de titel
+        cover = '<section class="cover">%s<p class="cover-kicker">Instructeurskaart</p><h1>%s</h1>%s</section>' % (
+            provenance_html(title, version), esc(title), ver)
     secs = []
     for ch in chapters:
         parts, its, done = [], ch['items'], set()
@@ -2174,6 +2493,9 @@ def render_html(chapters, title, version=''):
                 parts.append(h_item(it))
         body = ''.join(parts)
         kicker = '<p class="kicker">Hoofdstuk %d</p>' % ch['num'] if ch.get('num') else ''
+        if COMPACT[0] and len(chapters) == 1:
+            secs.append('<section class="chapter">%s</section>' % body)  # één hoofdstuk: geen extra kop
+            continue
         secs.append('<section class="chapter"><div class="chapter-header">%s<h1>%s</h1></div>%s</section>'
                     % (kicker, esc(ch['title']), body))
     css = rise_css().replace('__CPE_TITLE__', title.replace('\\', '\\\\').replace('"', '\\"'))
@@ -2225,6 +2547,13 @@ def render_html(chapters, title, version=''):
             '\n.sl .block:has(+ .block > ul), .sl .block:has(+ .block > ol) { margin-bottom: .4em; }'  # 'Verder:' + lijst
             '\n.quiz figure.solution { margin: .6em 0 .9em; }'
             '\n.quiz .answer figure.fb-image { margin: .6em 0 0; }'
+            '\n.sl a { color: #1b62a5; text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: .5px; }'
+            '\n.sl a strong, .sl a b { color: inherit; }'
+            '\n.popup figure.pu-img { margin: .6em 0 0; } .popup figure.pu-img img { max-height: 60mm; width: auto; max-width: 100%; }'
+            '\ntable.imgtable { border-collapse: collapse; width: 100%; font-size: 8.8pt; line-height: 1.35; margin: .4em 0 1.2em; }'
+            '\ntable.imgtable td { border: 1px solid var(--bd, #8aa); padding: .35em .55em; vertical-align: top; }'
+            '\ntable.imgtable p { margin: 0 0 .3em; } table.imgtable p:last-child { margin-bottom: 0; }'
+            '\ntable.imgtable tr { break-inside: avoid; }'
             '\nfigure.figcaps { margin: .8em 0 1.1em; break-inside: avoid; }'
             '\nfigure.figcaps img { width: 100%; height: auto; display: block; }'
             '\nfigure.figcaps .caps { display: grid; gap: 4mm; margin-top: .4em; text-align: center; font-size: .92em; }'
@@ -2239,9 +2568,9 @@ def render_html(chapters, title, version=''):
             '\n.sl .quiz .answer p + p { display: block; margin: .5em 0 0; }'
             '\n.popup.untitled { border: none; border-left: 3px solid #14324f; background: #f4f6f8; }'
             '\n.popup.untitled .pu-body { padding: .55em 1em .6em; }')
-    css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
+    css += '\n.gallery { display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0 1.6em; break-inside: avoid; }\n.gallery figure { flex: 1 1 45%; margin: 0; }\n.gallery figure img { max-height: 55mm; width: auto; }\n.gallery figure.full { flex: 1 1 100%; }\n.gallery:has(figure.full) { break-inside: auto; }\n.gallery figure { break-inside: avoid; }\n.gallery figure.full img { max-height: 95mm; }\n.block.formula p { text-align: center; font-weight: 700; }\n'
     return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
-            '<body class="forms sl">%s%s</body></html>') % (esc(title), css, cover, '\n'.join(secs))
+            '<body class="forms sl%s">%s%s</body></html>') % (esc(title), css + (COMPACT_CSS if COMPACT[0] else ''), ' compact' if COMPACT[0] else '', cover, '\n'.join(secs))
 
 
 def render_via_chrome(chapters, title, out_pdf, version=''):
@@ -2273,12 +2602,165 @@ def main():
     ap.add_argument('--pdf')
     ap.add_argument('--report', action='store_true')
     ap.add_argument('--model', help='schrijf het documentmodel als JSON (debug)')
+    ap.add_argument('--compact', action='store_true', help='instructiekaart-opmaak: compacter, kopjes i.p.v. pijllabels, geen eindlogo')
     ap.add_argument('--reportlab', action='store_true', help='oude ReportLab-opmaak i.p.v. de Rise-stijl via Chrome')
     a = ap.parse_args()
     with open(a.dump, encoding='utf-8') as f:
         dump = json.load(f)
     course = Course(dump)
+    fpath = (a.dump[:-8] if a.dump.endswith('.sl.json') else a.dump) + '.fixes.json'
+    if os.path.exists(fpath):
+        # handmatige correcties per cursus: {"omit_text": ["exacte tekst van een verborgen tekstvak", ...]}
+        fx = json.load(open(fpath, encoding='utf-8'))
+        OMIT_TEXT.extend(norm(t) for t in fx.get('omit_text', []))
+        OMIT_LAYERS.update(fx.get('omit_layers', []))
+        DEDUPE_TITLES[0] = bool(fx.get('dedupe_popups_by_title'))  # {"omit_layers": ["<laag-id>"]}
+    tpath = (a.dump[:-8] if a.dump.endswith('.sl.json') else a.dump) + '.tables.json'
+    if os.path.exists(tpath):
+        TABLES.update(json.load(open(tpath, encoding='utf-8')))
+        print('tabellen uit afbeeldingen:', len(TABLES))
+    COMPACT[0] = a.compact or json.load(open(fpath, encoding='utf-8')).get('compact', False) if os.path.exists(fpath) else a.compact
     chapters = build_document(course)
+    if COMPACT[0]:
+        # slotdia ('Einde instructeurskaart' + groot logo + vaste slotzin) weglaten
+        for ch in chapters:
+            for i, it in enumerate(ch['items']):
+                if it['kind'] in ('h2', 'h3', 'p') and re.match(r'^\s*einde (instructeurs|instructie)kaart', item_text(it), re.I):
+                    # alleen 'Einde …' en het logo weg; overige tekst (bv. 'Overal waar … hij staat, kan ook zij …') blijft
+                    rest = [x for x in ch['items'][i + 1:] if x['kind'] in ('p', 'caption', 'note', 'list')]
+                    ch['items'] = ch['items'][:i] + [dict(x, kind='caption', text=item_text(x)) for x in rest]
+                    break
+        # KOPPEN IN HOOFDLETTERS -> gewone zinsopbouw; afkortingen die in de lopende tekst ook in hoofdletters staan blijven
+        body_txt = ' '.join(item_text(it) for ch in chapters for it in ch['items'] if it['kind'] in ('p', 'list', 'labelrows', 'popup', 'cards'))
+        # alleen hoofdletterwoorden uit zinnen die zelf niet in hoofdletters staan (AED, PDCA, LMRA; niet 'MET')
+        sents = [x for x in re.split(r'(?<=[.!?:])\s+|\n', body_txt) if x and x != x.upper()]
+        STOP = {'MET', 'VAN', 'EN', 'DE', 'HET', 'OP', 'IN', 'TE', 'BIJ', 'OF', 'EEN', 'AAN', 'NAAR', 'VOOR', 'TIP', 'NIET', 'GEEN', 'WEL', 'OM', 'ZIJ', 'HIJ', 'DOOR', 'ZODRA', 'ALS', 'DAT', 'DIE'}
+        acr = {w for x in sents for w in re.findall(r'\b[A-Z][A-Z0-9]{1,4}\b', x)} - STOP
+        def _sc(t):
+            if not t or t != t.upper() or not re.search(r'[A-Z]{3}', t):
+                return t
+            words = t.split(' ')
+            out = [w if re.sub(r'\W', '', w) in acr else w.lower() for w in words]
+            first = next((i for i, w in enumerate(out) if re.search(r'[a-z]', w)), None)
+            if first is not None and out[first] == words[first].lower():
+                out[first] = out[first][:1].upper() + out[first][1:]
+            return ' '.join(out)
+        def _fix(o):
+            # overal (ook genest in naast-elkaar-blokken): koppen, pop-uptitels, losse kopregels in hoofdletters
+            if isinstance(o, dict):
+                k = o.get('kind')
+                if k in ('h2', 'h3', 'caption') and isinstance(o.get('text'), str):
+                    o['text'] = _sc(o['text'])
+                if isinstance(o.get('title'), str):
+                    o['title'] = _sc(o['title'])
+                if k == 'labelrows':
+                    o['rows'] = [(_sc(l), v) for l, v in o['rows']]
+                if k == 'p' and o.get('runs'):
+                    t0 = ''.join(r[0] for r in o['runs']).strip()
+                    if len(t0) <= 60 and t0 == t0.upper() and re.search(r'[A-Z]{3}', t0):
+                        o['runs'] = [(_sc(re.sub(r'\s+', ' ', t0)), True)]
+                if k == 'popup':
+                    fixed = []
+                    for kind, runs, tag in o['items']:
+                        t0 = ''.join(r[0] for r in runs).strip()
+                        if kind == 'p' and len(t0) <= 60 and t0 == t0.upper() and re.search(r'[A-Z]{3}', t0):
+                            runs = [(_sc(re.sub(r'\s+', ' ', t0)), True)]
+                        fixed.append((kind, runs, tag))
+                    o['items'] = fixed
+                for v in o.values():
+                    _fix(v)
+            elif isinstance(o, list):
+                for v in o:
+                    _fix(v)
+        _fix(chapters)
+        # Uitwerkingen van stappen (pop-ups '9.' + 'Vervolgen borstcompressies'): nummer en titel samen als kop,
+        # afgebroken opsommingsregels weer heel, op stapvolgorde direct na het stappenplan en elk maar één keer.
+        def _txt(runs):
+            return ''.join(r[0] for r in runs)
+        for ch in chapters:
+            its = ch['items']
+            for it in its:
+                if it['kind'] != 'popup':
+                    continue
+                ps = it['items']
+                if not it.get('title') and len(ps) >= 2 and ps[0][0] == 'p' and re.fullmatch(r'\s*\d{1,2}\.?\s*', _txt(ps[0][1])) \
+                        and ps[1][0] == 'p' and len(_txt(ps[1][1]).strip()) <= 70:
+                    it['title'] = '%s. %s' % (_txt(ps[0][1]).strip().rstrip('.'), norm(_txt(ps[1][1])))
+                    ps = ps[2:]
+                elif not it.get('title') and ps and ps[0][0] == 'p':
+                    m = re.match(r'^\s*(\d{1,2})\.\s*\n?\s*(\S.{0,70})$', _txt(ps[0][1]).strip(), re.S)
+                    if m:
+                        it['title'] = '%s. %s' % (m.group(1), norm(m.group(2)))
+                        ps = ps[1:]
+                    elif len(ps) >= 2 and len(_txt(ps[0][1]).strip()) <= 70 and not re.search(r'[.!?:]\s*$', _txt(ps[0][1]).strip()):
+                        it['title'] = norm(_txt(ps[0][1]))  # korte eerste regel = titel van de uitleg
+                        ps = ps[1:]
+                merged = []
+                for kind, runs, tag in ps:
+                    t = _txt(runs).strip()
+                    if merged and kind == 'p' and t and merged[-1][0] == 'li' \
+                            and not re.search(r'[.!?:;]\s*$', _txt(merged[-1][1]).strip()) and (t[:1].islower() or t[:1].isdigit()):
+                        k0, r0, g0 = merged[-1]
+                        merged[-1] = (k0, list(r0) + [(' ' + t, False)], g0)
+                        continue
+                    merged.append((kind, runs, tag))
+                it['items'] = merged
+            # dubbele uitwerkingen: zelfde titel (zonder stapnummer) -> alleen weg als de tekst er volledig in zit
+            body = lambda x: re.sub(r'\W+', '', ' '.join(_txt(r) for _, r, _ in x['items'])).lower()
+            out, first = [], {}
+            for it in its:
+                if it['kind'] == 'popup' and it.get('title'):
+                    key = re.sub(r'^\d+\.\s*', '', it['title']).lower()
+                    if key in first:
+                        old = first[key]
+                        if body(it) in body(old) or DEDUPE_TITLES[0]:
+                            continue  # (fixes.json 'dedupe_popups_by_title': ook bij afwijkende tekst alleen de eerste)
+                        if body(old) in body(it):
+                            out[out.index(old)] = it
+                            first[key] = it
+                            continue
+                    else:
+                        first[key] = it
+                out.append(it)
+            # per dia (tussen twee h2's): stapuitwerkingen op stapvolgorde direct na het stappenplan, daarna 'Didactische tips'
+            def _stepkey(x, steps):
+                t = x.get('title') or ''
+                m = re.match(r'(\d+)\.', t)
+                if m:
+                    return int(m.group(1))
+                w = re.sub(r'\W', '', t.split(' ')[0].lower())[:6]   # 'Combinatie' ~ stap 8 'Combineer ...'
+                for n, st in steps:
+                    if w and re.sub(r'\W', '', st.split(' ')[0].lower())[:6][:5] == w[:5]:
+                        return n
+                return None
+            res, k = [], 0
+            while k < len(out):
+                hi = k + 1
+                while hi < len(out) and out[hi]['kind'] != 'h2':
+                    hi += 1
+                seg = out[k:hi]
+                steps = []
+                for y in seg:
+                    if y['kind'] == 'list' and y.get('tag') == 'ol':
+                        for n0, li in enumerate(y['items'], start=1):
+                            steps.append((li.get('start') or n0 if n0 == 1 else n0 + (y['items'][0].get('start') or 1) - 1,
+                                          ''.join(r[0] for r in li['runs']).strip()))
+                pops = [(y, _stepkey(y, steps)) for y in seg if y['kind'] == 'popup']
+                stepped = [y for y, n in sorted([p_ for p_ in pops if p_[1] is not None], key=lambda p_: p_[1])]
+                if len(stepped) >= 2:
+                    tips = next((y for y in seg if y['kind'] == 'h3' and re.match(r'^didactische tips$', y['text'], re.I)), None)
+                    rest = [y for y in seg if y not in stepped and y is not tips]
+                    last_list = max([n_ for n_, y in enumerate(rest) if y['kind'] in ('list', 'p', 'figcaps', 'image', 'gallery')] or [len(rest) - 1])
+                    # eerste niet-stap pop-up krijgt de 'Didactische tips'-kop erboven
+                    after = rest[:last_list + 1] + stepped
+                    tail = rest[last_list + 1:]
+                    if tips is not None:
+                        tail = [tips] + tail
+                    seg = after + tail
+                res.extend(seg)
+                k = hi
+            out = res
+            ch['items'] = out
     for ch in chapters:
         for it in ch['items']:
             if it['kind'] == 'image':
@@ -2291,6 +2773,9 @@ def main():
             if it['kind'] == 'figrow':
                 for f in it['figs']:
                     f['data'] = course.images.get(f['url'], '')
+            if it['kind'] == 'popup':
+                for im in it.get('images') or []:
+                    im['data'] = course.images.get(im['url'], '')
             if it['kind'] == 'figcaps':
                 it['data'] = course.images.get(it['url'], '')
             if it['kind'] == 'quiz':
