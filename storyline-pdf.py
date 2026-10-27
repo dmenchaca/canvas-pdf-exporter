@@ -624,10 +624,14 @@ class Course:
             iy = max(0, min(a['y'] + (a.get('h') or 0), b['y'] + (b.get('h') or 0)) - max(a['y'], b['y']))
             return ix * iy / max((a.get('w') or 1) * (a.get('h') or 1), 1)
         same = lambda a, b: (round(a['x']), round(a['y']), a.get('w'), a.get('h')) == (round(b['x']), round(b['y']), b.get('w'), b.get('h'))
+        # Uitleg van markers (klik op een nummer -> tekstvak) opent steeds op dezelfde plek: die vakken bedekken
+        # elkaar wel, maar zijn nooit tegelijk te zien. Ze tellen dus niet als 'onder een ander vak verstopt'.
+        marker_gids = {str(e.get('id')).replace('_expandinglabel', '') for e in txt if 'expandinglabel' in str(e.get('id'))}
+        in_marker = lambda e: 'expandinglabel' in str(e.get('id')) or str(e.get('gid')) in marker_gids
         hidden = [] if interactions else \
-            [a for a in txt if a['layer'] == 0 and 'expandinglabel' not in str(a.get('id'))
+            [a for a in txt if a['layer'] == 0 and not in_marker(a)
              and any(b is not a and b['layer'] == a['layer'] and b.get('z', 0) > a.get('z', 0) and not same(a, b)
-                     and 'expandinglabel' not in str(b.get('id')) and _cover(a, b) >= 0.6 for b in txt)]
+                     and not in_marker(b) and _cover(a, b) >= 0.6 for b in txt)]
         entries = [e for e in entries if not any(e is h for h in hidden)]
         # Losse tekst die binnen het kader van een groep met maar één tekst (de kaarttitel) ligt, hoort bij die kaart:
         # bv. 'Voor wie?' in een gekleurd vak met de uitleg als los tekstvak erin.
