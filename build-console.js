@@ -82,3 +82,26 @@ const outSl = `// Canvas PDF Exporter — console-variant van Storyline-modus (g
 `;
 fs.writeFileSync(path.join(__dirname, 'console-storyline.js'), outSl);
 console.log('console-storyline.js geschreven (' + outSl.length + ' bytes)');
+
+// Modus D (Silverpoint): alleen de cursusbron + afbeeldingen downloaden.
+const sp = fs.readFileSync(path.join(__dirname, 'silverpoint.js'), 'utf8');
+const spHelpers = sp.match(/function silverpointInstallHelpers\(\) \{[\s\S]*?\n\}\n/);
+if (!spHelpers) throw new Error('silverpoint.js: helpers niet gevonden');
+const outSp = `// Canvas PDF Exporter — console-variant van Silverpoint-modus (gegenereerd door build-console.js)
+// 1. Open de Silverpoint-cursus (spelertabblad), open DevTools → Console, kies "top" als frame.
+// 2. Plak dit script en druk op Enter. Wacht tot "[cpe-sp] klaar" verschijnt.
+// 3. Er wordt een <cursus>.sp.json gedownload (cursusbron + afbeeldingen).
+// 4. Maak de PDF lokaal:  python3 silverpoint-pdf.py <cursus>.sp.json
+(async () => {
+  ${spHelpers[0].replace(/^function silverpointInstallHelpers\(\)/, '(function ()').replace(/\n\}\n$/, '\n})();\n')}
+  try {
+    const r = await window.__cpeSilverpoint.dump((phase, i, n, t) => { if (i === 1 || i % 10 === 0) console.log('[cpe-sp] ' + phase + ' ' + i + '/' + n); });
+    window.__cpeSilverpoint.download(r.json, r.name);
+    console.log('[cpe-sp] klaar: ' + r.pages + " pagina's, " + r.images + ' afbeeldingen; ' + r.name + ' gedownload. Nu: python3 silverpoint-pdf.py "' + r.name + '"');
+  } catch (e) {
+    console.error('[cpe-sp] fout', e);
+  }
+})();
+`;
+fs.writeFileSync(path.join(__dirname, 'console-silverpoint.js'), outSp);
+console.log('console-silverpoint.js geschreven (' + outSp.length + ' bytes)');
