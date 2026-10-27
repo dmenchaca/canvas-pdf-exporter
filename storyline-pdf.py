@@ -83,6 +83,13 @@ def is_nav_only(text):
 
 
 DOTS_RE = re.compile(r'^[\s.…_\-]+$')
+# zinnen in een fout-laag die alleen naar het goede antwoord verwijzen of 'fout' zeggen: geen extra inhoud
+WRONG_FILLER_RE = re.compile(r'^((dat is )?(nog )?niet (helemaal )?(goed|juist)|het (juiste|goede|correcte) antwoord( is)?:?|'
+                             r'bekijk (het|de) (juiste|goede|correcte) antwoord(en)?\b.*|controleer of (je )?antwoord.*|'
+                             r'(dat is )?(fout|onjuist)|probeer (het )?(nog eens|opnieuw).*)[.!:]*$', re.I)
+# zinnen op een menudia die alleen over het navigeren gaan
+MENU_NAV_SENT_RE = re.compile(r'\b(klik|kies een|button|knop|kom je (hier )?(weer )?terug|ga je terug|selecteer|'
+                              r'je hebt alle (hoofdstukken|onderdelen|casussen) doorlopen)\b', re.I)
 LABEL_PREFIX_RE = re.compile(r'^(invulvak|sleepitem|picture|rectangle|oval|hotspot|freeform|shape|image|afbeelding|drop|drag|item)\s*\d*\s*[-:]\s*', re.I)
 TUTORIAL_RE = re.compile(r'(deze knop|deze buttons?|met deze knoppen|navigeren|navigatie|via het menu|sluit de uitleg|'
                          r'klik op de knop|klik hier|hier zie je waar je)', re.I)
@@ -96,7 +103,7 @@ INSTRUCTION_RE = re.compile(r'^(kies|klik|vul|sleep|selecteer|geef|beantwoord|ze
 CREDIT_RE = re.compile(r'^\s*(©|\(c\)|bron\s*:|foto\s*:|beeld\s*:|afbeelding\s*:)', re.I)
 GENERIC_TITLE_RE = re.compile(r'^(nog niet|tekst|slide|dia|hoofdstuk|titel|welkom|menu|einde|meerkeuze|vraag|quiz|'
                               r'afbeelding|video|intro$|\d|$)|\+', re.I)
-HOTSPOT_LABEL_RE = re.compile(r'^j?(on)?juist\s*\d[\d\s]*$', re.I)
+HOTSPOT_LABEL_RE = re.compile(r'^(j?(on)?juist\s*\d[\d\s]*|(rectangular|oval|freeform)\s+hotspot(\s*\d+)?|(in)?correct)$', re.I)
 END_RE = re.compile(r'^einde (hoofdstuk|module|e-module|van (dit|het) hoofdstuk)', re.I)
 
 
@@ -394,6 +401,53 @@ class Course:
             return True
         c = self.text_count.get(t, 0)
         return c >= 4 and c >= self.slide_count * 0.25
+
+    def hotspot_rects(self, sid):
+        """Klikvlakken op de basislaag: naam (alt-tekst, bv. 'Rectangular Hotspot 10') -> [(x, y, w, h)]."""
+        out = {}
+        sl = self.slides.get(sid) or {}
+        for L in (sl.get('slideLayers') or [])[:1]:
+            for ob in L.get('objects') or []:
+                vd = ((ob.get('data') or {}).get('vectorData') or {})
+                alt = norm(vd.get('altText') or '')
+                if alt and HOTSPOT_LABEL_RE.match(alt) and ob.get('width'):
+                    out.setdefault(alt.lower(), []).append((ob.get('xPos') or 0, ob.get('yPos') or 0, ob['width'], ob['height']))
+        return out
+
+    def hotspot_solution(self, sid, entries, correct_labels):
+        """Aanwijsvraag: de afbeelding(en) van de vraag met de juiste plek(ken) groen gemarkeerd."""
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            return None, []
+        rects = self.hotspot_rects(sid)
+        good = [r for lab in correct_labels for r in rects.get(lab.lower(), [])]
+        if not good:
+            return None, []
+        gx0, gy0 = min(r[0] for r in good), min(r[1] for r in good)
+        gx1, gy1 = max(r[0] + r[2] for r in good), max(r[1] + r[3] for r in good)
+        # afbeeldingen op de basislaag die de klikvlakken raken (of eromheen liggen)
+        imgs = [e for e in entries if e['kind'] == 'image' and e['layer'] == 0 and self.images.get(e['url'])
+                and not (e['x'] > gx1 + 40 or e['x'] + e['w'] < gx0 - 40 or e['y'] > gy1 + 40 or e['y'] + e['h'] < gy0 - 40)]
+        if not imgs:
+            return None, []
+        bx0 = min([e['x'] for e in imgs] + [gx0]); by0 = min([e['y'] for e in imgs] + [gy0])
+        bx1 = max([e['x'] + e['w'] for e in imgs] + [gx1]); by1 = max([e['y'] + e['h'] for e in imgs] + [gy1])
+        W, H = int(bx1 - bx0), int(by1 - by0)
+        canvas = Image.new('RGBA', (W, H), (255, 255, 255, 255))
+        for e in imgs:
+            d = self.images[e['url']]
+            im = Image.open(io.BytesIO(base64.b64decode(d.split(',', 1)[1]))).convert('RGBA').resize((max(1, int(e['w'])), max(1, int(e['h']))))
+            canvas.alpha_composite(im, (int(e['x'] - bx0), int(e['y'] - by0)))
+        ov = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(ov)
+        for x, y, w, h in good:
+            box = (x - bx0, y - by0, x - bx0 + w, y - by0 + h)
+            dr.rectangle(box, fill=(46, 160, 67, 70), outline=(29, 107, 47, 255), width=max(4, W // 160))
+        canvas.alpha_composite(ov)
+        buf = io.BytesIO()
+        canvas.convert('RGB').save(buf, 'JPEG', quality=88)
+        return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode(), imgs
 
     def slide_entries(self, sid):
         """Alle zichtbare inhoud van een dia als platte lijst met positie en laag."""
@@ -956,7 +1010,7 @@ def clean_label(t):
     """Sleep-/invulitems heten in de cursusdata vaak 'SLEEPITEM3 - gesloten' of 'Picture 4 - foto.jpg'."""
     t = norm(decode(t))
     t = LABEL_PREFIX_RE.sub('', t)
-    t = re.sub(r'\s*-\s*(rectangle|oval|shape|picture|image|freeform|rounded rectangle)\s*\d*\s*$', '', t, flags=re.I)
+    t = re.sub(r'\s*-\s*(rectangle|oval|shape|picture|image|freeform|rounded rectangle|(rectangular|oval|freeform)\s+hotspot)\s*\d*(\.(emf|wmf|png|jpe?g|gif|svg))?\s*$', '', t, flags=re.I)
     t = re.sub(r'\.(jpe?g|png|gif|svg)$', '', t, flags=re.I)
     t = re.sub(r'^\d+(\.\d+)*\s*[-–]\s*', '', t)  # "4 - 4.06 hybride auto" -> "hybride auto"
     return t.strip()
@@ -1189,7 +1243,7 @@ def merge_broken_tuples(seq):
     return out
 
 
-def build_quiz(course, entries, interactions, layer_ids, heading):
+def build_quiz(course, entries, interactions, layer_ids, heading, sid=None):
     """Vraagblok(ken) voor een dia met interacties, plus de lagen die al verwerkt zijn."""
     texts = [e for e in entries if e['kind'] == 'text' and not e['is_choice'] and e is not heading]
     base_texts = [e for e in texts if e['layer'] == 0 and not (CREDIT_RE.match(norm(e['text'])) and len(norm(e['text'])) < 80)]
@@ -1244,6 +1298,32 @@ def build_quiz(course, entries, interactions, layer_ids, heading):
                         continue  # zelfde foto als bij de vraag (vaak een iets andere uitsnede)
                     fb_images.append({'url': e['url'], 'w': e['w'], 'h': e['h'], 'alt': e.get('alt', '')})
 
+    # Fout-laag: alleen wat níet al in de toelichting staat (bv. een tip); 'Helaas, dat is fout' valt weg
+    fb_plain = ' '.join(norm(''.join(r[0] for r in runs)) for _, runs, _ in fb_items)
+    wrong_items = []
+    sl_ = course.slides.get(sid) or {} if sid else {}
+    for L in sl_.get('slideLayers') or []:
+        if L.get('id') not in wrong_layers:
+            continue
+        for it_ in sorted(course.flatten(L), key=lambda i: (i['y'], i['x'])):
+            for b in course.text_blocks(it_['ob']) or []:
+                if is_nav_only(b['text']) or re.search(r'%[A-Za-z_][A-Za-z0-9_.]*%', b['text']):
+                    continue
+                for kind_, runs, tag in block_to_items(b):
+                    t = norm(''.join(r[0] for r in runs))
+                    t2 = norm(FEEDBACK_LEAD_RE.sub('', t, count=1))
+                    if not t2 or FEEDBACK_ONLY_RE.match(t2) or re.match(r'^(probeer (het )?(nog eens|opnieuw)|klik|kijk nog eens)\b', t2, re.I):
+                        continue
+                    # knoppen ('Doorgaan') en losse labels uit een oplossingstekening ('C', 'D2', 'BG') zijn geen feedback
+                    if NAV_WORD_RE.match(t2) or len(re.findall(r'[A-Za-zÀ-ÿ]{2,}', t2)) < 3:
+                        continue
+                    t2 = ' '.join(x for x in re.split(r'(?<=[.!?:])\s+', t2) if not WRONG_FILLER_RE.match(norm(x)))
+                    if len(re.findall(r'[A-Za-zÀ-ÿ]{2,}', t2)) < 3:
+                        continue
+                    if t2 in fb_plain or any(t2 == norm(''.join(r[0] for r in x[1])) for x in wrong_items):
+                        continue
+                    wrong_items.append((kind_, [(t2, False)] if t2 != t else runs, tag))
+
     used = IdSet()
     quizzes = []
     for it in interactions:
@@ -1251,7 +1331,8 @@ def build_quiz(course, entries, interactions, layer_ids, heading):
         lms = it.get('lmsId') or ''
         q = {'kind': 'quiz', 'type': kind, 'question': [], 'options': [], 'pairs': [], 'answers': [], 'prompt': None,
              'feedback': fb_items if it is interactions[-1] else [],
-             'fb_images': fb_images if it is interactions[-1] else []}
+             'fb_images': fb_images if it is interactions[-1] else [],
+             'wrong': wrong_items if it is interactions[-1] else []}
         # Vraagtekst: tekst die op '?' eindigt, anders de eerste basistekst.
         qe = next((e for e in base_texts if re.search(r'\?\s*$', e['text']) and e not in used), None) or \
             next((e for e in base_texts if e not in used), None) or heading
@@ -1314,7 +1395,13 @@ def build_quiz(course, entries, interactions, layer_ids, heading):
                 cid = str(c.get('id')).split('.')[-1]
                 q['options'].append((clean_label(c.get('lmstext') or ''), cid in ids))
             if q['options'] and all(HOTSPOT_LABEL_RE.match(o[0]) for o in q['options']):
-                # Aanwijsvraag (hotspots op een afbeelding): de labels zeggen niets, de toelichting wel.
+                # Aanwijsvraag (hotspots op een afbeelding): de labels zeggen niets; de juiste plek tekenen
+                good = [o[0] for o in q['options'] if o[1]]
+                sol, sol_imgs = course.hotspot_solution(sid, entries, good) if sid else (None, [])
+                if sol:
+                    q['solution'] = {'data': sol, 'url': '', 'w': 0, 'h': 0}
+                    for e in sol_imgs:
+                        used.add(e)   # de vraagafbeelding zit al in de oplossing; niet nog eens los tonen
                 q['options'] = []
                 q['hotspot'] = True
         # Instructies ("Kies het juiste antwoord.") horen in het vraagkader.
@@ -1411,7 +1498,7 @@ def slide_model(course, sid, suppress_heading=False):
     consumed_layers = set()
     quizzes = []
     if interactions:
-        quizzes, used, consumed_layers = build_quiz(course, entries, interactions, layer_ids, heading)
+        quizzes, used, consumed_layers = build_quiz(course, entries, interactions, layer_ids, heading, sid)
     elif any(e['kind'] == 'input' for e in entries):
         quizzes, used, consumed_layers = build_reflection(entries, heading)
     if heading is not None and heading in used:
@@ -1796,6 +1883,26 @@ def build_document(course):
             host['slides'] += g['slides']
         host['items'] = host.get('intro', []) + host['items']
         chapters = [c for c in chapters if not any(c is g for g in guests)]
+    # Uitleg op het hoofdmenu ('De e-module bestaat uit ...'): het menu zelf valt weg, de uitleg niet.
+    if chapters:
+        have = ' '.join(norm(r[0]) for c in chapters for it in c['items'] for r in it.get('runs', []) if r) + ' ' + \
+            ' '.join(norm(it.get('text', '')) for c in chapters for it in c['items'])
+        extra = []
+        for sid in course.slides:
+            if not re.match(r'^(keuzemenu|menu|hoofdmenu)$', norm(course.meta.get(sid, {}).get('title') or ''), re.I):
+                continue
+            ents, _, _ = course.slide_entries(sid)
+            for e in sorted((e for e in ents if e['kind'] == 'text' and e['layer'] == 0), key=lambda e: (e['y'], e['x'])):
+                for t in re.split(r'[\r\n\u2028]+', e['text']):
+                    # alleen de beschrijvende zinnen; navigatiezinnen ('Kies een hoofdstuk.', 'Klik op ...') vallen weg
+                    t = ' '.join(x for x in re.split(r'(?<=[.!?])\s+', norm(t)) if not MENU_NAV_SENT_RE.search(x))
+                    t = norm(t)
+                    if len(t) < 25 or not re.search(r'[.:!?]$', t) or is_nav_only(t) or TUTORIAL_RE.search(t) or t in have:
+                        continue
+                    extra.append({'kind': 'p', 'runs': [(t, False)], 'src': sid})
+                    have += ' ' + t
+        if extra:
+            chapters[0]['items'] = chapters[0]['items'] + extra
     for i, c in enumerate(chapters, 1):
         c['n'] = i
         for k in ('jumps', 'intro', 'menu_words', 'labels', 'scenes'):
@@ -2246,7 +2353,7 @@ def h_quiz(q):
     body.append('<div class="question">' + ''.join(qs) + '</div>')
     if q.get('prompt'):
         body.append('<p>' + esc(q['prompt']) + '</p>')
-    if q.get('hotspot'):
+    if q.get('hotspot') and not q.get('solution', {}).get('data'):
         body.append('<p class="hint">Aanwijsvraag: klik in de e-module de juiste plek(ken) op de afbeelding aan. De juiste plaatsing staat in de toelichting.</p>')
     if q.get('open'):
         body.append('<p class="hint">Open vraag: schrijf je antwoord op en vergelijk het met het voorbeeld hieronder.</p>')
@@ -2278,6 +2385,9 @@ def h_quiz(q):
                 fb.append('<figure class="fb-image"><img src="%s" alt="%s"></figure>' % (im['data'], esc(im.get('alt', ''))))
         body.append('<div class="answer"><span class="answer-label">%s:</span> %s</div>' % (
             'Voorbeeldantwoord' if q.get('open') else 'Toelichting', ''.join(fb)))
+    if q.get('wrong'):
+        wb = ''.join(('<p>• ' if kind == 'li' else '<p>') + h_runs(runs) + '</p>' for kind, runs, tag in merge_broken_tuples(q['wrong']))
+        body.append('<div class="answer"><span class="answer-label">Bij een fout antwoord:</span> %s</div>' % wb)
     return '<div class="quiz">' + ''.join(body) + '</div>'
 
 
@@ -2782,7 +2892,8 @@ def main():
                 for im in it.get('fb_images') or []:
                     im['data'] = course.images.get(im['url'], '')
             if it['kind'] == 'quiz' and it.get('solution'):
-                it['solution']['data'] = course.images.get(it['solution']['url'], '')
+                if it['solution'].get('url'):
+                    it['solution']['data'] = course.images.get(it['solution']['url'], '')
     if a.model:
         with open(a.model, 'w', encoding='utf-8') as f:
             json.dump([{**ch, 'items': [{k: v for k, v in i.items() if k not in ('data', 'images')} for i in ch['items']]} for ch in chapters],
