@@ -32,6 +32,22 @@ th { background: #eef2f5; }
 .cover .cover-kicker { font-size: 11pt; color: #bc1413; margin-bottom: .8em; }
 .cover h1 { font-size: 28pt; line-height: 1.15; margin: 0 0 .6em; letter-spacing: -.01em; text-wrap: balance; }
 .cover .toc { margin-top: 3em; }
+.cover .cover-desc { font-size: 11pt; line-height: 1.5; color: #333; max-width: 150mm; }
+.cover .cover-desc p { margin: 0 0 .5em; }
+figure.cpe-video { margin: .6em 0 1.2em; break-inside: avoid; }
+figure.cpe-video .vthumb { position: relative; display: inline-block; line-height: 0; border-radius: 4px; overflow: hidden; }
+figure.cpe-video .vthumb img { max-height: 70mm; width: auto; max-width: 100%; display: block; }
+figure.cpe-video .play { position: absolute; left: 50%; top: 50%; width: 15mm; height: 15mm; margin: -7.5mm 0 0 -7.5mm; border-radius: 50%; background: rgba(0,0,0,.55); }
+figure.cpe-video .play::after { content: ""; position: absolute; left: 5.8mm; top: 4mm; border-style: solid; border-width: 3.5mm 0 3.5mm 5.6mm; border-color: transparent transparent transparent #fff; }
+figure.cpe-video figcaption { font-size: 9pt; color: #333; margin-top: .35em; }
+figure.cpe-video figcaption p { display: inline; margin: 0; }
+p.cpe-media-note { margin: .5em 0 1em; padding: .5em .8em; border: 1px solid #d6d6d6; border-radius: 6px; background: #f7f7f7; font-size: 9.5pt; }
+.cpe-gallery { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; margin: .6em 0 1.2em; }
+.cpe-gallery figure { margin: 0; break-inside: avoid; }
+ol.cpe-timeline { list-style: none; padding: 0; margin: .6em 0 1.2em; border-left: 3px solid #bc1413; }
+ol.cpe-timeline li { padding: 0 0 .9em 1.1em; break-inside: avoid; }
+ol.cpe-timeline .tl-date { font-weight: 700; color: #bc1413; }
+ol.cpe-timeline h3 { margin: .1em 0 .3em; font-size: 11pt; }
 /* Herkomstvermelding op de voorpagina (info-stijl) */
 .cover .provenance { margin-top: 2.6em; padding: .85em 1.1em .85em 3.1em; position: relative; background: #eef5fb; border: 1px solid #c6dcee; border-radius: 6px; font-size: 9pt; line-height: 1.45; color: #23384a; break-inside: avoid; }
 .cover .provenance::before { content: "i"; position: absolute; left: 1.05em; top: .95em; width: 1.35em; height: 1.35em; border-radius: 50%; background: #2f6fa3; color: #fff; font: 700 8.5pt/1.35em Georgia, serif; text-align: center; font-style: italic; }
@@ -103,6 +119,8 @@ body.forms .quiz ul.options li::before { border-color: transparent; background: 
 .quiz ul.options li.correct p { display: inline; }
 .quiz .answer { margin-top: .9em; padding-top: .7em; border-top: 1px dashed #b9c6cd; color: #1a1a1a; }
 .quiz .answer p { display: inline; }
+.quiz .answer p + p, .quiz .answer ul, .quiz .answer ol { display: block; margin: .45em 0 0; }
+.quiz .answer ul, .quiz .answer ol { padding-left: 1.3em; }
 .quiz .answer-label { font-weight: 700; color: #2f6f8f; }
 
 .labels { margin: 1em 0 .6em; padding-left: 1.4em; }
@@ -175,7 +193,165 @@ def bg_color(el):
     return (m.group(1).lower() if m else '#ffffff')
 
 
+# ----------------------------------------------------------------------------- Rise-cursusdata (--course)
+# Inhoud die in de opgeslagen pagina ontbreekt (pas zichtbaar na een klik, afspelen of inzenden) komt uit de
+# cursusdata van de speler: feedback bij vragen, video's, embeds, onderschriften, tijdlijnlabels, omschrijving.
+COURSE = {'course': None, 'blocks': {}, 'canvas_imgs': {}}
+
+
+def load_course(path):
+    import json
+    d = json.load(open(path, encoding='utf-8'))
+    c = d.get('course', d) if isinstance(d, dict) else d
+    blocks = {}
+    for les in c.get('lessons') or []:
+        for it in les.get('items') or []:
+            if it and it.get('id'):
+                blocks[it['id']] = it
+    COURSE['course'], COURSE['blocks'] = c, blocks
+    # Afbeeldingen van canvasblokken (mondrian) staan los in het pakket; rise_canvas_imgs.js bewaart ze ernaast.
+    import os
+    side = re.sub(r'\.rise\.json$', '', path) + '.canvasimg.json'
+    COURSE['canvas_imgs'] = json.load(open(side, encoding='utf-8')) if os.path.exists(side) else {}
+
+
+def canvas_images_html(item):
+    """Afbeeldingen in een canvasblok, van boven naar beneden en links naar rechts."""
+    c = COURSE['course'] or {}
+    imgs = COURSE.get('canvas_imgs') or {}
+    out = []
+    for it in ((c.get('mondrian') or {}).get('items') or {}).values():
+        if it.get('type') != 'image' or it.get('blockumentId') != item.get('blockumentId') or it.get('removed'):
+            continue
+        st = (it.get('states') or {}).get('default') or {}
+        a = (it.get('assets') or {}).get((st.get('fill') or {}).get('assetId') or '')
+        d = imgs.get(a['path']) if a else None
+        if d and d.startswith('data:'):
+            out.append((st.get('y') or 0, st.get('x') or 0, '<figure><img src="%s" alt=""></figure>' % d))
+    return ''.join(h for _, _, h in sorted(out))
+
+
+def rich(h, soup):
+    """Rijke tekst uit de cursusdata (HTML) -> schone HTML, zoals de rest van het document."""
+    if not h or not norm(BeautifulSoup(h, 'html.parser').get_text(' ')):
+        return ''
+    frag = BeautifulSoup('<div class="fr-view">%s</div>' % h, 'html.parser')
+    return clean_rich(frag.div, soup)
+
+
+def fetch_image(url):
+    """Miniatuur (video/embed) ophalen als data-URL; leeg als het niet lukt. Cache in ~/.cache."""
+    import base64, hashlib, os, urllib.request
+    if not url:
+        return ''
+    url = ('https:' + url) if url.startswith('//') else url
+    cache = os.path.expanduser('~/.cache/canvas-pdf-exporter/thumbs')
+    os.makedirs(cache, exist_ok=True)
+    f = os.path.join(cache, hashlib.sha1(url.encode()).hexdigest() + '.jpg')
+    if not os.path.exists(f):
+        try:
+            with urllib.request.urlopen(url, timeout=15) as r:
+                data = r.read()
+            if len(data) < 500:
+                return ''
+            open(f, 'wb').write(data)
+        except Exception:
+            return ''
+    return 'data:image/jpeg;base64,' + base64.b64encode(open(f, 'rb').read()).decode()
+
+
+def data_block_html(item, wrapper, soup):
+    """Blokken die in de pagina leeg of onvolledig zijn, opbouwen uit de cursusdata; None = gewone weg."""
+    from html import escape
+    t, v = item.get('type'), item.get('variant')
+    sub = item.get('items') or []
+    if t == 'multimedia' and v == 'video':
+        out = []
+        for it in sub:
+            vid = (it.get('media') or {}).get('video') or {}
+            th = vid.get('thumbnail') or ''
+            th = re.sub(r'/f:jpg,[^/]*/', '/f:jpg,b:fff,w:960/', th) if 'images.articulate.com' in th else th
+            img = fetch_image(th)
+            cap = rich(it.get('caption'), soup)
+            name = vid.get('originalUrl') or vid.get('key') or ''
+            out.append('<figure class="cpe-video">%s<figcaption>&#9654; Video in de e-module%s &ndash; bekijk deze video in de e-module.%s</figcaption></figure>' % (
+                ('<div class="vthumb"><img src="%s" alt=""><span class="play"></span></div>' % img) if img else '',
+                (': <strong>%s</strong>' % escape(re.sub(r'\.\w+$', '', name))) if name and not cap else '',
+                (' ' + cap) if cap else ''))
+        return '\n'.join(out)
+    if t == 'multimedia' and v == 'embed':
+        out = []
+        for it in sub:
+            em = (it.get('media') or {}).get('embed') or {}
+            url = em.get('originalUrl') or em.get('url') or ''
+            img = fetch_image(em.get('thumbnail') or '')
+            title = escape(em.get('title') or url)
+            prov = escape(em.get('provider') or '')
+            out.append('<figure class="cpe-video">%s<figcaption>&#9654; %s%s: <a href="%s">%s</a>%s</figcaption></figure>' % (
+                ('<a href="%s"><div class="vthumb"><img src="%s" alt=""><span class="play"></span></div></a>' % (escape(url), img)) if img else '',
+                'Video' if (em.get('embedType') == 'video' or 'youtube' in url) else 'Webinhoud', (' (%s)' % prov) if prov else '',
+                escape(url), title, ('<br>%s' % escape(em.get('description'))) if em.get('description') else ''))
+        return '\n'.join(out)
+    if t == 'multimedia' and v == 'audio':
+        return '\n'.join('<p class="cpe-media-note">&#128266; Audiofragment in de e-module: %s</p>' % (
+            norm(BeautifulSoup(it.get('caption') or '', 'html.parser').get_text(' ')) or escape(((it.get('media') or {}).get('audio') or {}).get('originalUrl') or ''))
+            for it in sub)
+    if t == 'multimedia' and v == 'attachment':
+        return '\n'.join('<p class="cpe-media-note">&#128206; Bijlage in de e-module: %s</p>' % escape(
+            ((it.get('media') or {}).get('attachment') or {}).get('originalUrl') or 'bijlage') for it in sub)
+    if t == 'image' and v == 'centered' and len(sub) > 1:
+        # Carrousel: alle dia's met hun onderschrift
+        imgs = wrapper.find_all('img')
+        figs = []
+        for i, it in enumerate(sub):
+            img = imgs[i] if i < len(imgs) else None
+            cap = rich(it.get('caption'), soup)
+            figs.append('<figure>%s%s</figure>' % (image_html(img) if img else '', ('<figcaption>%s</figcaption>' % cap) if cap else ''))
+        return '<div class="cpe-gallery">%s</div>' % ''.join(figs)
+    if t == 'interactive' and v == 'timeline':
+        imgs = wrapper.find_all('img')
+        rows = []
+        for i, it in enumerate(sub):
+            img = imgs[i] if i < len(imgs) else None
+            rows.append('<li><div class="tl-date">%s</div>%s%s%s</li>' % (
+                escape(norm(it.get('date') or '')), ('<h3>%s</h3>' % escape(norm(it.get('title') or ''))) if norm(it.get('title') or '') else '',
+                rich(it.get('description'), soup), ('<figure>%s</figure>' % image_html(img)) if img else ''))
+        return '<ol class="cpe-timeline">%s</ol>' % ''.join(rows)
+    return None
+
+
+def quiz_data(item, idx, soup):
+    """(feedback-HTML bij een goed antwoord, juiste antwoordteksten, type) voor vraag idx van een kennischeck."""
+    qs = item.get('items') or []
+    if idx >= len(qs):
+        return '', [], ''
+    q = qs[idx]
+    ft = q.get('feedbackType')
+    answers = q.get('answers') or []
+    good = [a for a in answers if a.get('correct')]
+    if ft == 'ANY':
+        fb = rich(q.get('feedback'), soup)
+    elif ft == 'CHOICE':
+        fb = ''.join(rich(a.get('feedback'), soup) or ('<p>%s</p>' % a['feedback'] if a.get('feedback') else '') for a in good)
+    else:
+        fb = rich(q.get('feedbackCorrect'), soup)
+    return fb, [norm(BeautifulSoup(a.get('title') or '', 'html.parser').get_text(' ')) for a in good], q.get('type') or ''
+
+
 def convert_block(wrapper, soup):
+    item = COURSE['blocks'].get(wrapper.get('data-block-id') or '')
+    h = _convert_block(wrapper, soup)
+    if item is not None and item.get('type') == 'custom':
+        h += canvas_images_html(item)
+    return h
+
+
+def _convert_block(wrapper, soup):
+    item = COURSE['blocks'].get(wrapper.get('data-block-id') or '')
+    if item is not None:
+        dh = data_block_html(item, wrapper, soup)
+        if dh is not None:
+            return dh
     inner = wrapper.select_one('[class*="block-"], [class*="blocks-"]')
     if inner is None:
         return ''
@@ -288,7 +464,7 @@ def convert_block(wrapper, soup):
         out.append(inner.decode_contents())
 
     elif kind == 'block-knowledge':
-        for card in inner.select('.quiz-card'):
+        for qi, card in enumerate(inner.select('.quiz-card')):
             title = card.select_one('.quiz-card__title')
             img = card.select_one('.quiz-card__media img')
             hint = None
@@ -321,6 +497,11 @@ def convert_block(wrapper, soup):
                     match_rows.append('<tr><td>%s</td><td>%s</td></tr>' % (left[i] if i < len(left) else '', right[i] if i < len(right) else ''))
             correct = card.get('data-cpe-correct')
             correct = set(int(x) for x in correct.split(',') if x.strip().isdigit()) if correct else set()
+            d_fb, d_good, d_type = quiz_data(item, qi, soup) if item is not None else ('', [], '')
+            if item is not None and opts and d_good:
+                # juiste opties uit de cursusdata (op tekst; de volgorde op het scherm kan geschud zijn)
+                by_text = set(d_good)
+                correct = {i for i, (t, h) in enumerate(opts) if t in by_text} or correct
             # Onzichtbare unieke marker per optie: daarop zoekt add_form_fields de plek van het vakje (optietekst kan ook elders voorkomen).
             global _OPT_SEQ
             marks = []
@@ -332,6 +513,8 @@ def convert_block(wrapper, soup):
             title_html = clean_rich(title.select_one('.fr-view') or title, soup) if title else ''
             # Alleen de toelichting bij een goed antwoord; de 'fout'-tekst is voor lezers niet zinvol.
             feedback = card.get('data-cpe-feedback') or ''
+            if item is not None and d_fb:
+                feedback = d_fb   # letterlijk uit de cursusdata, met alinea's
             body = '<div class="quiz-label">Vraag</div>'
             body += '<div class="question">%s</div>' % title_html
             if img:
@@ -343,6 +526,9 @@ def convert_block(wrapper, soup):
             elif match_rows:
                 body += '<p class="hint">Koppel elk begrip aan het juiste antwoord (antwoorden staan in willekeurige volgorde).</p>'
                 body += '<table class="matching"><tr><th>Begrippen</th><th>Antwoorden (willekeurige volgorde)</th></tr>%s</table>' % ''.join(match_rows)
+            elif d_type == 'FILL_IN_THE_BLANK' and d_good:
+                body += '<div class="answer"><span class="answer-label">Juiste antwoord:</span> %s</div>' % ' / '.join(d_good)
+                correct = {0}
             else:
                 inter = card.select_one('.quiz-card__interactive')
                 if inter:
@@ -389,8 +575,10 @@ def convert(src_html):
         joined = re.sub(r'<h2 class="band">\s*Vraag\s*</h2>\s*(?=<div class="quiz">)', '', joined)
         body.append('<section class="chapter"><div class="chapter-header"><p class="kicker">Hoofdstuk %d</p><h1>%s</h1></div>%s</section>' %
                     (i, ch_title, joined))
-    cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>'
-             '<div class="toc"><h2>Inhoud</h2><ol>%s</ol></div>%s</section>') % (title, ''.join(toc), provenance_html(BeautifulSoup(title, 'html.parser').get_text()))
+    desc = rich((COURSE['course'] or {}).get('description'), soup) if COURSE['course'] else ''
+    cover = ('<section class="cover"><p class="cover-kicker">E-module</p><h1>%s</h1>%s'
+             '<div class="toc"><h2>Inhoud</h2><ol>%s</ol></div>%s</section>') % (
+        title, ('<div class="cover-desc">%s</div>' % desc) if desc else '', ''.join(toc), provenance_html(BeautifulSoup(title, 'html.parser').get_text()))
     css = CSS.replace('__CPE_TITLE__', title.replace('\\', '\\\\').replace('"', '\\"'))
     return ('<!doctype html><html lang="nl"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head>'
             '<body class="forms">%s%s</body></html>') % (title, css, cover, '\n'.join(body))
@@ -425,6 +613,7 @@ def add_form_fields(pdf_path, html):
     doc = fitz.open(pdf_path)
     n = 0
     cur_page, cur_y = 0, -1.0  # opties staan in documentvolgorde: alleen vooruit zoeken
+    places = []   # (pagina, rechthoek van de marker, groep, optie, juist)
     for gi, (kind, labels) in enumerate(groups):
         for li, (label, is_correct) in enumerate(labels):
             needle = label  # unieke marker (onzichtbare tekst) aan het begin van de optie
@@ -436,23 +625,35 @@ def add_form_fields(pdf_path, html):
                     continue
                 r = min(hits, key=lambda x: x.y0)
                 cur_page, cur_y = page.number, r.y0
-                size = 11.0  # 1em bij 11pt, zelfde plek als het CSS-vakje (left 0, top .2em)
-                box = fitz.Rect(r.x0, r.y0 + 0.2 * size, r.x0 + size, r.y0 + 1.2 * size)
-                w = fitz.Widget()
-                # Overal selectievakjes: keuzerondje-groepen gaan stuk in PyMuPDF (bad xref).
-                w.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
-                w.field_name = 'vraag_%d_optie_%d' % (gi, li)
-                w.rect = box
-                w.border_color = (0.42, 0.48, 0.52)
-                w.border_width = 1
-                w.fill_color = (1, 1, 1)
-                w.text_color = (0.1, 0.1, 0.1)
-                if is_correct:
-                    w.field_value = True
-                    w.border_color = (0.11, 0.42, 0.18)
-                page.add_widget(w)
-                n += 1
+                places.append((page.number, r, gi, li, is_correct))
                 break
+    # De markers zelf weghalen: anders komen ze mee bij kopiëren, zoeken en voorlezen.
+    by_page = {}
+    for pno, r, gi, li, ok in places:
+        by_page.setdefault(pno, []).append(r)
+    for pno, rects in by_page.items():
+        page = doc[pno]
+        for r in rects:
+            page.add_redact_annot(fitz.Rect(r.x0, r.y0, r.x1, r.y1))
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+    for pno, r, gi, li, is_correct in places:
+        page = doc[pno]
+        size = 11.0  # 1em bij 11pt, zelfde plek als het CSS-vakje (left 0, top .2em)
+        box = fitz.Rect(r.x0, r.y0 + 0.2 * size, r.x0 + size, r.y0 + 1.2 * size)
+        w = fitz.Widget()
+        # Overal selectievakjes: keuzerondje-groepen gaan stuk in PyMuPDF (bad xref).
+        w.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
+        w.field_name = 'vraag_%d_optie_%d' % (gi, li)
+        w.rect = box
+        w.border_color = (0.42, 0.48, 0.52)
+        w.border_width = 1
+        w.fill_color = (1, 1, 1)
+        w.text_color = (0.1, 0.1, 0.1)
+        if is_correct:
+            w.field_value = True
+            w.border_color = (0.11, 0.42, 0.18)
+        page.add_widget(w)
+        n += 1
     tmp = str(pdf_path) + '.tmp'
     doc.save(tmp, garbage=1, deflate=True)  # incrementeel bewaren lukt niet op Chrome-PDF's (xref-stream)
     doc.close()
@@ -468,6 +669,8 @@ def main():
     src = Path(args[0])
     out_html = Path(args[args.index('--html') + 1]) if '--html' in args else src.with_name(src.stem + '-print.html')
     out_pdf = Path(args[args.index('--pdf') + 1]) if '--pdf' in args else None
+    if '--course' in args:
+        load_course(args[args.index('--course') + 1])
     if '--ready' in args:
         # Invoer is al een printdocument (bijv. van console-storyline.js): alleen afdrukken + velden.
         html = src.read_text(encoding='utf-8')
